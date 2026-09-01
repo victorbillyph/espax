@@ -586,10 +586,12 @@ static void processWsEvent(const JsonDocument &doc) {
       }
       http.end();
     }
+    broadcastState();
 
   } else if (type == "appstore_uninstall") {
     String appId = doc["appId"] | "";
     desktop.uninstallApp(appId);
+    broadcastState();
 
   } else if (type == "appstore_install_zip") {
     String appId = doc["appId"] | "";
@@ -602,6 +604,7 @@ static void processWsEvent(const JsonDocument &doc) {
     String css = doc["css"] | "";
     if (appId.length() > 0 && tmpl.length() > 0) {
       desktop.installApp(appId, name, desc, icon, author, version, tmpl, css);
+      broadcastState();
     }
 
   } else if (type == "check_update") {

@@ -605,20 +605,36 @@ function renderAppBody(body, w, state) {
         try {
           const zip = await JSZip.loadAsync(file);
 
+          // buscar arquivo no zip (case-insensitive, inclui subpastas)
+          function findFile(name) {
+            const lower = name.toLowerCase();
+            let found = null;
+            zip.forEach((path, entry) => {
+              if (!found && path.toLowerCase().endsWith(lower)) found = entry;
+            });
+            return found;
+          }
+
           // ler manifest.json
-          const manifestFile = zip.file('manifest.json');
-          if (!manifestFile) { status.textContent = 'manifest.json nao encontrado no zip'; status.style.color = '#ef4444'; return; }
+          const manifestFile = findFile('manifest.json');
+          if (!manifestFile) {
+            const files = [];
+            zip.forEach(p => files.push(p));
+            status.textContent = 'manifest.json nao encontrado. Arquivos: ' + files.join(', ');
+            status.style.color = '#ef4444';
+            return;
+          }
           const manifestText = await manifestFile.async('string');
           const manifest = JSON.parse(manifestText);
 
           // ler template.html
-          const templateFile = zip.file('template.html');
+          const templateFile = findFile('template.html');
           if (!templateFile) { status.textContent = 'template.html nao encontrado no zip'; status.style.color = '#ef4444'; return; }
           const template = await templateFile.async('string');
 
           // ler style.css (opcional)
           let css = '';
-          const cssFile = zip.file('style.css');
+          const cssFile = findFile('style.css');
           if (cssFile) css = await cssFile.async('string');
 
           const appId = manifest.id || file.name.replace('.zip', '');
