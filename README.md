@@ -4,6 +4,27 @@ Sistema operacional-desktop que roda no **ESP32**, acessado 100% via **navegador
 Não precisa de display físico: o desktop, as janelas e os aplicativos são servidos pelo ESP32
 e renderizados no browser do cliente.
 
+## 📦 Instalar a ferramenta (ESPaxTool)
+
+O **ESPaxTool** é o utilitário que procura seu ESP32 pela porta USB, detecta se é um ESPax,
+instala o firmware nele e faz toda a configuração (WiFi, login, etc.).
+
+Instale em uma linha (sem sudo, vai para `~/.local/bin`):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/victorbillyph/espax/main/install.sh | bash
+```
+
+Depois é só executar:
+
+```bash
+espax-tool            # procura a porta sozinho e guia a instalacao/configuracao
+espax-tool /dev/ttyUSB0
+```
+
+> Pré-requisito: `curl` e `python3`. O instalador cuida das dependências
+> (`pyserial`, `platformio`) e adiciona `~/.local/bin` ao PATH.
+
 ## Recursos
 
 - **Desktop com desktop, ícones e taskbar** (estilo Windows)
@@ -27,6 +48,9 @@ e renderizados no browser do cliente.
 ESPax/
 ├── platformio.ini      # configuração PlatformIO (ESP32 + Arduino + ArduinoJson)
 ├── src/main.cpp        # firmware: WiFi, servidor web, serial config, APIs
+├── ESPaxTool           # utilitário de instalação/configuração (script)
+├── espax-serial.py     # helper pyserial do ESPaxTool
+├── install.sh          # instalador via curl (baixa e instala o ESPaxTool)
 └── data/               # arquivos web carregados no LittleFS
     ├── index.html
     ├── style.css
@@ -53,13 +77,14 @@ pio device monitor
 
 O **uploadfs** é obrigatório — sem ele o desktop não carrega (a árvore web mora no LittleFS).
 
-## ESPax Tools (script de instalação/configuração)
+## ESPaxTool (utilitário de instalação/configuração)
 
-O script `espax.sh` automatiza procura, instalação e configuração do ESP32 via porta serial USB.
+O script `ESPaxTool` automatiza procura, instalação e configuração do ESP32 via porta serial USB.
 
 ```bash
-./espax.sh                 # procura a porta sozinho
-./espax.sh /dev/ttyUSB0    # usa uma porta especifica
+./ESPaxTool               # procura a porta sozinho
+./ESPaxTool /dev/ttyUSB0  # usa uma porta especifica
+# (ou via instalador: espax-tool)
 ```
 
 Ele detecta a porta serial (/dev/ttyUSB* /dev/ttyACM*), envia `ping` e:
