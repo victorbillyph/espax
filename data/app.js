@@ -629,3 +629,7 @@ DOM.startButton.addEventListener('click', () => {
   // open start menu - open About
   createWindow('about');
 });
+
+// Ao carregar: esconde a tela de "Iniciando ESPax..." e mostra o login.
+DOM.loadingScreen.classList.add('hidden');
+DOM.loginScreen.classList.remove('hidden');
