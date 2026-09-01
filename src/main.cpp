@@ -1,12 +1,14 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WebServer.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncJson.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <LittleFS.h>
-#include <SPIFFS.h>
 #include "FS.h"
+#include "Desktop.h"
+#include "Apps.h"
 
 #define DEFAULT_PASSWORD "admin"
 #define DEFAULT_HOSTNAME "espax"
@@ -17,7 +19,10 @@
 #define AUTH_TIMEOUT_MS 1000 * 60 * 30
 
 Preferences prefs;
-WebServer server(80);
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+Desktop desktop;
 
 static char hostname[64] = DEFAULT_HOSTNAME;
 static char wifi_ssid[64] = DEFAULT_WIFI_SSID;
@@ -26,11 +31,11 @@ static char sys_name[64] = "ESPax";
 static char login_user[32] = DEFAULT_USERNAME;
 static char login_pass[64] = DEFAULT_PASSWORD;
 
-static const char *TAG = "ESPax";
+static String html_index;
+static String html_style;
+static String html_app;
 
 // ---------- Buffer helpers ----------
-static String html_index;
-
 static String loadFile(const char *path) {
   File f = LittleFS.open(path, "r");
   if (!f) return String();
@@ -105,25 +110,19 @@ static void processSerialLine(const String &lineIn) {
     return;
   }
 
-  // ping - protocolo de deteccao do ESPax tools
   if (lower == "ping") {
     Serial.println("[ESPax] pong");
     return;
   }
 
-  // info - informacoes de configuracao (para o script de setup)
   if (lower == "info" || lower == "cfg") {
     Serial.printf("[CFG] %s\n", wifi_ssid);
     Serial.printf("[NAME] %s\n", sys_name);
     return;
   }
 
-  // scan - lista redes WiFi disponiveis (protocolo ESPax tools)
   if (lower == "scan") {
     Serial.println("[SCAN] iniciando");
-    // O scan de redes exige que o STA esteja ativo. Se estamos so em AP
-    // (modo AP puro), mudar temporariamente para AP_STA para o scan funcionar
-    // sem travar o stack WiFi do ESP32.
     bool wasAp = (WiFi.getMode() & WIFI_AP) != 0;
     bool wasSta = (WiFi.getMode() & WIFI_STA) != 0;
     if (!wasSta) {
@@ -139,13 +138,11 @@ static void processSerialLine(const String &lineIn) {
         (int)WiFi.encryptionType(i));
     }
     WiFi.scanDelete();
-    // restaura o modo original
     if (wasAp && !wasSta) WiFi.mode(WIFI_AP);
     Serial.println("[SCAN] fim");
     return;
   }
 
-  // wifi set <ssid> <pass>
   if (lower.startsWith("wifi ")) {
     String rest = line.substring(5);
     rest.trim();
@@ -180,10 +177,7 @@ static void processSerialLine(const String &lineIn) {
     return;
   }
 
-  // hostname set <nome>
   if (lower.startsWith("hostname ")) {
-    String rest = line.substring(9);
-    rest.trim();
     if (lower.startsWith("hostname set ")) {
       String name = line.substring(13);
       name.trim();
@@ -199,10 +193,7 @@ static void processSerialLine(const String &lineIn) {
     return;
   }
 
-  // name set <nome>
   if (lower.startsWith("name ")) {
-    String rest = line.substring(5);
-    rest.trim();
     if (lower.startsWith("name set ")) {
       String name = line.substring(9);
       name.trim();
@@ -218,10 +209,7 @@ static void processSerialLine(const String &lineIn) {
     return;
   }
 
-  // login set <user> <pass>
   if (lower.startsWith("login ")) {
-    String rest = line.substring(6);
-    rest.trim();
     if (lower.startsWith("login set ")) {
       String args = line.substring(10);
       int sp = args.indexOf(' ');
@@ -234,7 +222,6 @@ static void processSerialLine(const String &lineIn) {
           user.toCharArray(login_user, 32);
           pass.toCharArray(login_pass, 64);
           Serial.printf("Login configurado: user='%s'\n", login_user);
-          Serial.println("Para ver a senha, use 'show pass'.");
         } else {
           Serial.println("Usuario max 29 chars, senha de 1 a 61 chars.");
         }
@@ -247,13 +234,11 @@ static void processSerialLine(const String &lineIn) {
     return;
   }
 
-  // show pass
   if (lower == "show pass") {
     Serial.printf("Senha: %s\n", login_pass);
     return;
   }
 
-  // save
   if (lower == "save") {
     prefs.putString("hostname", hostname);
     prefs.putString("sys_name", sys_name);
@@ -265,20 +250,17 @@ static void processSerialLine(const String &lineIn) {
     return;
   }
 
-  // reset wifi
   if (lower == "reset wifi") {
     wifi_ssid[0] = 0;
     wifi_pass[0] = 0;
     prefs.putString("wifi_ssid", "");
     prefs.putString("wifi_pass", "");
     Serial.println("WiFi resetado. Iniciando modo AP...");
-    // Vamos apenas reiniciar, o boot detecta wifi vazio e vai para AP
     delay(500);
     ESP.restart();
     return;
   }
 
-  // reboot
   if (lower == "reboot") {
     Serial.println("Reiniciando...");
     delay(300);
@@ -297,7 +279,7 @@ static void processSerialLine(const String &lineIn) {
 
 static void printWelcome() {
   Serial.println("\n==========================================");
-  Serial.println("        ESPax - Web Desktop System v1.0");
+  Serial.println("        ESPax - Web Desktop System v1.1");
   Serial.println("==========================================");
   Serial.println("Sistema operacional de desktop rodando no ESP32,");
   Serial.println("acessado via navegador web.");
@@ -306,7 +288,6 @@ static void printWelcome() {
     Serial.printf("  Acesse: http://%s  ou  http://%s\n", hostname, WiFi.localIP().toString().c_str());
   } else if (strlen(wifi_ssid) > 0) {
     Serial.printf("  WiFi configurado para '%s' mas nao conectado.\n", wifi_ssid);
-    Serial.println("  Verifique a senha com 'status'.");
   } else {
     Serial.println("  Modo AP ativo. Conecte no WiFi 'ESPax-AP'.");
     Serial.println("  Acesse: 192.168.4.1");
@@ -336,18 +317,151 @@ static bool checkAuth() {
   return true;
 }
 
-// ---------- API handlers ----------
-static void apiLogin() {
-  if (server.method() != HTTP_POST) {
-    server.send(405, "text/plain", "Method Not Allowed");
-    return;
+// ---------- Estado: serializacao completa ----------
+static void fillState(JsonDocument &s) {
+  s["type"] = "state";
+  s["name"] = sys_name;
+  s["hostname"] = hostname;
+  s["heap"] = (long)ESP.getFreeHeap();
+  s["uptime"] = (unsigned long)(millis() / 1000);
+  s["ip"] = WiFi.localIP().toString();
+  s["ssid"] = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : "";
+  s["chip"]["cores"] = ESP.getChipCores();
+  s["chip"]["frequency"] = ESP.getCpuFreqMHz();
+  s["chip"]["flash_size"] = (unsigned long)ESP.getFlashChipSize();
+  s["chip"]["model"] = ESP.getChipModel();
+
+  JsonArray wins = s["windows"].to<JsonArray>();
+  for (int i = 0; i < desktop.windowCount; i++) {
+    Window *w = desktop.windows[i];
+    if (!w) continue;
+    JsonObject o = wins.add<JsonObject>();
+    o["id"] = (unsigned long)w->id;
+    o["app"] = w->app;
+    o["title"] = w->title;
+    o["x"] = w->x;
+    o["y"] = w->y;
+    o["w"] = w->w;
+    o["h"] = w->h;
+    o["z"] = (unsigned long)w->z;
+    o["min"] = w->minimized;
+    o["max"] = w->maximized;
+    if (w->app == "files") {
+      JsonArray files = o["files"].to<JsonArray>();
+      File root = LittleFS.open("/");
+      if (root && root.isDirectory()) {
+        File f = root.openNextFile();
+        while (f) {
+          if (!f.isDirectory()) {
+            JsonObject fo = files.add<JsonObject>();
+            fo["name"] = String("/") + f.name();
+            fo["size"] = (unsigned long)f.size();
+          }
+          f = root.openNextFile();
+        }
+      }
+    }
+    o["data"] = w->data.as<JsonVariant>();
   }
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, server.arg("plain"));
-  if (err) {
-    server.send(400, "application/json", "{\"ok\":false,\"msg\":\"Bad JSON\"}");
-    return;
+}
+
+// ---------- Estado: broadcast para todos os clientes WS ----------
+static void broadcastState() {
+  JsonDocument s;
+  fillState(s);
+  String out;
+  serializeJson(s, out);
+  ws.textAll(out);
+}
+
+// ---------- Processamento de eventos vindos do browser ----------
+static void processWsEvent(const JsonDocument &doc) {
+  String type = doc["type"] | "";
+  uint32_t id = (uint32_t)doc["id"];
+
+  if (type == "open") {
+    String app = doc["app"] | "";
+    desktop.openApp(app);
+  } else if (type == "close") {
+    desktop.closeWindow(id);
+  } else if (type == "min") {
+    desktop.minimizeWindow(id);
+  } else if (type == "max") {
+    desktop.maximizeWindow(id);
+  } else if (type == "restore") {
+    desktop.restoreWindow(id);
+  } else if (type == "focus") {
+    desktop.focusWindow(id);
+  } else if (type == "move") {
+    desktop.moveWindow(id, (int)doc["x"], (int)doc["y"]);
+  } else if (type == "resize") {
+    desktop.resizeWindow(id, (int)doc["w"], (int)doc["h"]);
+  } else if (type == "app") {
+    Window *w = desktop.getWindow(id);
+    if (w) {
+      JsonDocument ctx;
+      ctx["name"] = sys_name;
+      ctx["hostname"] = hostname;
+      ctx["ip"] = WiFi.localIP().toString();
+      ctx["heap"] = (long)ESP.getFreeHeap();
+      ctx["uptime"] = (unsigned long)(millis() / 1000);
+      JsonVariantConst action = doc["action"];
+      handleAppAction(w, action, ctx);
+      if (ctx["doReboot"] | false) {
+        broadcastState();
+        delay(300);
+        ESP.restart();
+      }
+      if (ctx["doResetWifi"] | false) {
+        wifi_ssid[0] = 0;
+        wifi_pass[0] = 0;
+        prefs.putString("wifi_ssid", "");
+        prefs.putString("wifi_pass", "");
+        broadcastState();
+        delay(300);
+        ESP.restart();
+      }
+    }
   }
+
+  broadcastState();
+}
+
+static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+                      AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    client->printf("{\"type\":\"hello\",\"name\":\"%s\"}", sys_name);
+    JsonDocument s;
+    fillState(s);
+    String out;
+    serializeJson(s, out);
+    client->text(out);
+  } else if (type == WS_EVT_DATA) {
+    AwsFrameInfo *info = (AwsFrameInfo *)arg;
+    if (info->final && info->index == 0 && info->len == len &&
+        info->opcode == WS_TEXT) {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (!err) {
+        processWsEvent(doc);
+      }
+    }
+  } else if (type == WS_EVT_ERROR) {
+    // ignore
+  }
+}
+
+// ---------- API HTTP (login + utilitarios) ----------
+static String serializeJsonSafe(const String &s) {
+  JsonDocument d;
+  d["c"] = s;
+  String out;
+  serializeJson(d, out);
+  return out;
+}
+
+static void apiLogin(AsyncWebServerRequest *request, JsonVariant &json) {
+  JsonObject doc = json.as<JsonObject>();
   String u = doc["user"] | "";
   String p = doc["pass"] | "";
   if (u.equals(login_user) && p.equals(login_pass)) {
@@ -359,55 +473,47 @@ static void apiLogin() {
     r["name"] = sys_name;
     String out;
     serializeJson(r, out);
-    server.send(200, "application/json", out);
+    request->send(200, "application/json", out);
   } else {
-    server.send(401, "application/json", "{\"ok\":false,\"msg\":\"Credenciais invalidas\"}");
+    request->send(401, "application/json", "{\"ok\":false,\"msg\":\"Credenciais invalidas\"}");
   }
 }
 
-static void apiStatus() {
+static void apiStatus(AsyncWebServerRequest *request) {
   if (!checkAuth()) {
-    server.send(401, "application/json", "{\"ok\":false,\"msg\":\"Not auth\"}");
+    request->send(401, "application/json", "{\"ok\":false,\"msg\":\"Not auth\"}");
     return;
   }
   JsonDocument r;
   r["ok"] = true;
   r["name"] = sys_name;
   r["hostname"] = hostname;
-  r["heap"] = ESP.getFreeHeap();
-  r["uptime"] = millis() / 1000;
+  r["heap"] = (long)ESP.getFreeHeap();
+  r["uptime"] = (unsigned long)(millis() / 1000);
   r["ip"] = WiFi.localIP().toString();
   r["ssid"] = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : "";
   r["chip"]["cores"] = ESP.getChipCores();
   r["chip"]["frequency"] = ESP.getCpuFreqMHz();
-  r["chip"]["flash_size"] = ESP.getFlashChipSize();
+  r["chip"]["flash_size"] = (unsigned long)ESP.getFlashChipSize();
   r["chip"]["model"] = ESP.getChipModel();
   String out;
   serializeJson(r, out);
-  server.send(200, "application/json", out);
+  request->send(200, "application/json", out);
 }
 
-static String serializeJsonSafe(const String &s) {
-  JsonDocument d;
-  d["c"] = s;
-  String out;
-  serializeJson(d, out);
-  return out;
-}
-
-static void apiNotepad() {
+static void apiNotepad(AsyncWebServerRequest *request) {
   if (!checkAuth()) {
-    server.send(401, "application/json", "{\"ok\":false}");
+    request->send(401, "application/json", "{\"ok\":false}");
     return;
   }
-  if (server.method() == HTTP_GET) {
+  if (request->method() == HTTP_GET) {
     String content = loadFile("/notepad.txt");
-    server.send(200, "application/json", "{\"ok\":true,\"content\":" + serializeJsonSafe(content) + "}");
-  } else if (server.method() == HTTP_POST) {
+    request->send(200, "application/json", "{\"ok\":true,\"content\":" + serializeJsonSafe(content) + "}");
+  } else if (request->method() == HTTP_POST) {
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, server.arg("plain"));
+    DeserializationError err = deserializeJson(doc, request->arg("plain"));
     if (err) {
-      server.send(400, "application/json", "{\"ok\":false}");
+      request->send(400, "application/json", "{\"ok\":false}");
       return;
     }
     String content = doc["content"] | "";
@@ -415,34 +521,18 @@ static void apiNotepad() {
     if (f) {
       f.print(content);
       f.close();
-      server.send(200, "application/json", "{\"ok\":true}");
+      request->send(200, "application/json", "{\"ok\":true}");
     } else {
-      server.send(500, "application/json", "{\"ok\":false,\"msg\":\"FS error\"}");
+      request->send(500, "application/json", "{\"ok\":false,\"msg\":\"FS error\"}");
     }
   } else {
-    server.send(405, "application/json", "{\"ok\":false}");
+    request->send(405, "application/json", "{\"ok\":false}");
   }
 }
 
-static void apiSend() {
+static void apiFiles(AsyncWebServerRequest *request) {
   if (!checkAuth()) {
-    server.send(401, "application/json", "{\"ok\":false}");
-    return;
-  }
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, server.arg("plain"));
-  if (err) {
-    server.send(400, "application/json", "{\"ok\":false}");
-    return;
-  }
-  String cmd = doc["cmd"] | "";
-  Serial.println(cmd);
-  server.send(200, "application/json", "{\"ok\":true}");
-}
-
-static void apiFiles() {
-  if (!checkAuth()) {
-    server.send(401, "application/json", "{\"ok\":false}");
+    request->send(401, "application/json", "{\"ok\":false}");
     return;
   }
   JsonDocument r;
@@ -455,95 +545,29 @@ static void apiFiles() {
       if (!f.isDirectory()) {
         JsonObject o = arr.add<JsonObject>();
         o["name"] = String("/") + f.name();
-        o["size"] = f.size();
+        o["size"] = (unsigned long)f.size();
       }
       f = root.openNextFile();
     }
   }
   String out;
   serializeJson(r, out);
-  server.send(200, "application/json", out);
+  request->send(200, "application/json", out);
 }
 
-static void apiSaveSettings() {
+static void apiReboot(AsyncWebServerRequest *request) {
   if (!checkAuth()) {
-    server.send(401, "application/json", "{\"ok\":false}");
+    request->send(401, "application/json", "{\"ok\":false}");
     return;
   }
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, server.arg("plain"));
-  if (err) {
-    server.send(400, "application/json", "{\"ok\":false}");
-    return;
-  }
-  String name = doc["name"] | "";
-  String host = doc["hostname"] | "";
-  String user = doc["user"] | "";
-  String pass = doc["pass"] | "";
-  String wssid = doc["wifi_ssid"] | "";
-  String wpass = doc["wifi_pass"] | "";
-
-  if (name.length()) name.toCharArray(sys_name, 64);
-  if (host.length()) host.toCharArray(hostname, 64);
-  if (user.length()) user.toCharArray(login_user, 32);
-  if (pass.length()) pass.toCharArray(login_pass, 64);
-  if (wssid.length()) wssid.toCharArray(wifi_ssid, 64);
-  if (wpass.length()) wpass.toCharArray(wifi_pass, 64);
-
-  prefs.putString("hostname", hostname);
-  prefs.putString("sys_name", sys_name);
-  prefs.putString("login_user", login_user);
-  prefs.putString("login_pass", login_pass);
-  prefs.putString("wifi_ssid", wifi_ssid);
-  prefs.putString("wifi_pass", wifi_pass);
-
-  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"Settings saved (reboot to apply network)\"}");
-}
-
-static File pendingUpload;
-
-static void apiReboot() {
-  if (!checkAuth()) {
-    server.send(401, "application/json", "{\"ok\":false}");
-    return;
-  }
-  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"Rebooting...\"}");
+  request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Rebooting...\"}");
   delay(300);
   ESP.restart();
 }
 
-static void apiUpload() {
-  if (!checkAuth()) {
-    server.send(401, "application/json", "{\"ok\":false}");
-    return;
-  }
-  HTTPUpload &up = server.upload();
-  if (up.status == UPLOAD_FILE_START) {
-    String filename = up.filename;
-    if (filename.length() == 0) {
-      filename = server.arg("name");
-    }
-    if (filename.length() == 0 || filename.startsWith("/")) {
-      server.send(400, "application/json", "{\"ok\":false,\"msg\":\"invalid name\"}");
-      return;
-    }
-    String path = String("/") + filename;
-    up.filename = path;
-    File f = LittleFS.open(path, "w");
-    if (!f) {
-      server.send(500, "application/json", "{\"ok\":false,\"msg\":\"fs error\"}");
-      return;
-    }
-    pendingUpload = f;
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (pendingUpload) { pendingUpload.write(up.buf, up.currentSize); }
-  } else if (up.status == UPLOAD_FILE_END) {
-    if (pendingUpload) { pendingUpload.close(); pendingUpload = File(); }
-    server.send(200, "application/json", "{\"ok\":true,\"msg\":\"uploaded\"}");
-  } else if (up.status == UPLOAD_FILE_ABORTED) {
-    if (pendingUpload) { pendingUpload.close(); pendingUpload = File(); }
-    server.send(500, "application/json", "{\"ok\":false}");
-  }
+static void apiClearSession(AsyncWebServerRequest *request) {
+  session.token = 0;
+  request->send(200, "application/json", "{\"ok\":true}");
 }
 
 // ---------- WiFi connect ----------
@@ -565,18 +589,12 @@ static void setupAP() {
   WiFi.softAP("ESPax-AP", "espax1234");
 }
 
-// ---------- Static serving ----------
-static void serveRoot() {
-  server.send(200, "text/html", html_index);
-}
-
 void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
   Serial.println("Iniciando ESPax...");
 
-  // Preferences
   prefs.begin("espax", false);
   String s_hostname = prefs.getString("hostname", DEFAULT_HOSTNAME);
   String s_sysname = prefs.getString("sys_name", "ESPax");
@@ -592,7 +610,6 @@ void setup() {
   s_wssid.toCharArray(wifi_ssid, 64);
   s_wpass.toCharArray(wifi_pass, 64);
 
-  // LittleFS
   if (!LittleFS.begin()) {
     Serial.println("LittleFS falhou ao montar. Formatando...");
     LittleFS.format();
@@ -601,7 +618,6 @@ void setup() {
     }
   }
 
-  // WiFi
   if (!connectStation()) {
     if (strlen(wifi_ssid) > 0) {
       Serial.println("Nao foi possivel conectar ao WiFi configurado.");
@@ -617,41 +633,55 @@ void setup() {
     Serial.printf("Hostname: %s.local\n", hostname);
   }
 
+  // Desktop model
+  desktop.begin();
+
   // Index
   html_index = loadFile("/index.html");
 
+  // WebSocket
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
+
   // Routes
-  server.on("/", serveRoot);
-  server.on("/index.html", serveRoot);
-  server.on("/style.css", []() {
-    server.send(200, "text/css", loadFile("/style.css"));
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html", html_index);
   });
-  server.on("/app.js", []() {
-    server.send(200, "application/javascript", loadFile("/app.js"));
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html", html_index);
   });
-  server.on("/api/login", HTTP_POST, apiLogin);
+  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/css", loadFile("/style.css"));
+  });
+  server.on("/app.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/javascript", loadFile("/app.js"));
+  });
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/login",
+    [](AsyncWebServerRequest *request, JsonVariant &json) {
+      apiLogin(request, json);
+    }));
   server.on("/api/status", HTTP_GET, apiStatus);
   server.on("/api/notepad", HTTP_GET, apiNotepad);
   server.on("/api/notepad", HTTP_POST, apiNotepad);
-  server.on("/api/send", HTTP_POST, apiSend);
   server.on("/api/files", HTTP_GET, apiFiles);
-  server.on("/api/settings", HTTP_POST, apiSaveSettings);
   server.on("/api/reboot", HTTP_POST, apiReboot);
-  server.on("/api/upload", HTTP_POST, apiUpload);
-  server.onNotFound([]() {
-    server.send(404, "text/plain", "Not found");
+  server.on("/api/logout", HTTP_POST, apiClearSession);
+
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    request->send(404, "text/plain", "Not found");
   });
 
   server.begin();
-  Serial.println("Servidor HTTP iniciado!");
+  Serial.println("Servidor HTTP + WebSocket iniciado!");
 
   printWelcome();
 }
 
+unsigned long lastSerialPrint = 0;
+
 void loop() {
-  server.handleClient();
+  ws.cleanupClients();
   handleSerial();
-  if (WiFi.status() == WL_CONNECTED) {
-    delay(1);
-  }
+  delay(1);
 }

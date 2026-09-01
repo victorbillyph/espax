@@ -1,64 +1,124 @@
-// ==================================================
-// ESPax - Web Desktop System (client-side)
-// ==================================================
+// ============================================================================
+// ESPax - Thin Client
+// O ESP32 processa e mantem o estado (janelas, apps, dados).
+// Este arquivo apenas: renderiza o estado recebido e envia eventos de input.
+// Renderizacao (HTML) fica no browser; PROCESSAMENTO fica no ESP32.
+// ============================================================================
 
-let token = null;
-let sysName = 'ESPax';
-let windows = [];
-let nextId = 1;
-let topZ = 40;
-let openedApps = {};
-
-const APP_META = {
-  files:    { icon: '📁', title: 'Arquivos' },
-  browser:  { icon: '🌐', title: 'Browser' },
-  calc:     { icon: '🧮', title: 'Calculadora' },
-  notepad:  { icon: '📝', title: 'Bloco de Notas' },
-  terminal: { icon: '🖥️', title: 'Terminal' },
-  settings: { icon: '⚙️', title: 'Configurações' },
-  about:    { icon: 'ℹ️', title: 'Sobre o ESPax' }
-};
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 const DOM = {
-  loginScreen: document.getElementById('login-screen'),
-  loadingScreen: document.getElementById('loading-screen'),
-  desktop: document.getElementById('desktop'),
-  loginForm: document.getElementById('login-form'),
-  loginUser: document.getElementById('login-user'),
-  loginPass: document.getElementById('login-pass'),
-  loginError: document.getElementById('login-error'),
-  loginName: document.getElementById('login-name'),
-  windowHost: document.getElementById('window-host'),
-  taskbarTasks: document.getElementById('taskbar-tasks'),
-  startButton: document.getElementById('start-button'),
-  clock: document.getElementById('taskbar-clock'),
-  date: document.getElementById('taskbar-date'),
-  desktopIcons: document.getElementById('desktop-icons'),
+  loginScreen: $('#login-screen'),
+  loadingScreen: $('#loading-screen'),
+  desktop: $('#desktop'),
+  desktopIcons: $('#desktop-icons'),
+  taskbarTasks: $('#taskbar-tasks'),
+  taskbarClock: $('#taskbar-clock'),
+  taskbarDate: $('#taskbar-date'),
+  startButton: $('#start-button'),
+  loginForm: $('#login-form'),
+  loginUser: $('#login-user'),
+  loginPass: $('#login-pass'),
+  loginError: $('#login-error'),
+  loginName: $('#login-name'),
+  windowHost: $('#window-host'),
 };
 
-// ---------- Helpers ----------
-function $(sel, root = document) { return root.querySelector(sel); }
-function $$(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+let sysName = 'ESPax';
+let authed = false;
+let ws = null;
+let wsReconnect = null;
 
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+// ============================================================================
+// Comunicacao ESP32 (WebSocket)
+// ============================================================================
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
+  }
 }
 
-async function api(path, method = 'GET', body = null) {
-  const opts = { method, headers: {} };
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => { console.log('[ESPax] websocket conectado'); };
+  ws.onclose = () => {
+    console.log('[ESPax] websocket fechado, reconectando...');
+    // se nao autenticado, mostra login
+    if (!authed) showLogin();
+    wsReconnect = setTimeout(connectWS, 3000);
+  };
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === 'hello') {
+      sysName = msg.name || sysName;
+    } else if (msg.type === 'state') {
+      renderState(msg);
+    }
+  };
+}
+
+// ============================================================================
+// Login / Logout (via HTTP)
+// ============================================================================
+
+async function api(path, method = 'GET', body) {
+  const opts = { method };
   if (body) {
-    opts.headers['Content-Type'] = 'application/json';
+    opts.headers = { 'Content-Type': 'application/json' };
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
-  if (res.status === 401) {
-    logout();
-    throw new Error('Não autorizado');
-  }
-  return res.json();
+  let data = {};
+  try { data = await res.json(); } catch {}
+  return { ok: res.ok, ...data };
 }
+
+function showLogin() {
+  DOM.loadingScreen.classList.add('hidden');
+  DOM.loginScreen.classList.remove('hidden');
+  DOM.desktop.classList.add('hidden');
+  DOM.loginError.textContent = '';
+}
+
+function enterDesktop() {
+  authed = true;
+  DOM.loadingScreen.classList.add('hidden');
+  DOM.loginScreen.classList.add('hidden');
+  DOM.desktop.classList.remove('hidden');
+  updateClock();
+  setInterval(updateClock, 1000);
+}
+
+DOM.loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  DOM.loginError.textContent = '';
+  const user = DOM.loginUser.value.trim();
+  const pass = DOM.loginPass.value;
+  if (!user || !pass) { DOM.loginError.textContent = 'Preencha usuário e senha.'; return; }
+  enterDesktop();
+  // o estado completo chega pelo websocket apos o login
+});
+
+function logout() {
+  authed = false;
+  api('/api/logout', 'POST');
+  showLogin();
+  DOM.loginPass.value = '';
+}
+
+function updateClock() {
+  const now = new Date();
+  DOM.taskbarClock.textContent = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  DOM.taskbarDate.textContent = now.toLocaleDateString('pt-BR');
+}
+
+// ============================================================================
+// Renderizacao do estado (vindo do ESP32)
+// ============================================================================
 
 function prettyBytes(n) {
   if (n < 1024) return n + ' B';
@@ -66,570 +126,283 @@ function prettyBytes(n) {
   return (n / 1048576).toFixed(2) + ' MB';
 }
 
-// ---------- Auth ----------
-DOM.loginForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  DOM.loginError.textContent = '';
-  const user = DOM.loginUser.value.trim();
-  const pass = DOM.loginPass.value;
-  if (!user || !pass) { DOM.loginError.textContent = 'Preencha usuário e senha.'; return; }
-  try {
-    const res = await api('/api/login', 'POST', { user, pass });
-    if (res.ok) {
-      token = res.token;
-      sysName = res.name || sysName;
-      enterDesktop();
-    } else {
-      DOM.loginError.textContent = res.msg || 'Falha no login.';
+// Mapeia (app, id) -> componente DOM (janela atual)
+const windowEls = new Map(); // id -> { win, el }
+
+function renderState(state) {
+  sysName = state.name || sysName;
+  const order = state.windows
+    .slice()
+    .sort((a, b) => a.z - b.z);
+
+  // fechar janelas que nao existem mais no estado
+  const existing = new Set(order.map(w => w.id));
+  for (const [id, entry] of windowEls) {
+    if (!existing.has(id)) {
+      entry.el.remove();
+      windowEls.delete(id);
     }
-  } catch (err) {
-    DOM.loginError.textContent = 'Erro de conexão com o servidor.';
   }
-});
 
-function logout() {
-  token = null;
-  DOM.desktop.classList.add('hidden');
-  DOM.loginScreen.classList.remove('hidden');
-  windows.forEach(w => w.el.remove());
-  windows = [];
-  openedApps = {};
-  DOM.taskbarTasks.innerHTML = '';
-  DOM.loginPass.value = '';
-}
-
-function enterDesktop() {
-  DOM.loadingScreen.classList.add('hidden');
-  DOM.loginScreen.classList.add('hidden');
-  DOM.desktop.classList.remove('hidden');
-  DOM.loginName.textContent = sysName;
-  updateClock();
-  setInterval(updateClock, 1000);
-  refreshSystemInfo();
-}
-
-// ---------- Clock ----------
-function updateClock() {
-  const now = new Date();
-  DOM.clock.textContent = now.toLocaleTimeString('pt-BR');
-  DOM.date.textContent = now.toLocaleDateString('pt-BR');
-}
-
-// ---------- Window manager ----------
-function activateWindow(id) {
-  const w = windows.find(x => x.id === id);
-  if (!w) return;
-  windows.forEach(x => {
-    x.el.classList.remove('active');
-    if (x.el === w.el) x.el.classList.add('active');
+  // renderizar/criar cada janela
+  order.forEach(w => {
+    let entry = windowEls.get(w.id);
+    if (!entry) {
+      const el = createWindowEl(w);
+      entry = { w, el };
+      windowEls.set(w.id, entry);
+      DOM.windowHost.appendChild(el);
+    } else {
+      entry.w = w;
+    }
+    applyWindowState(entry, w);
   });
-  w.el.style.zIndex = ++topZ;
-  updateTaskbar();
+
+  renderTaskbar(order);
 }
 
-function createWindow(appId) {
-  const meta = APP_META[appId];
-  if (openedApps[appId]) {
-    activateWindow(openedApps[appId]);
+function createWindowEl(w) {
+  const el = document.createElement('div');
+  el.className = 'window';
+  el.innerHTML = `
+    <div class="titlebar">
+      <span class="title">${esc(w.title || w.app)}</span>
+      <span class="win-controls">
+        <button class="win-btn win-min" data-act="min">–</button>
+        <button class="win-btn win-max" data-act="max">▢</button>
+        <button class="win-btn win-close" data-act="close">✕</button>
+      </span>
+    </div>
+    <div class="win-body"></div>
+  `;
+
+  const bar = $('.titlebar', el);
+  const body = $('.win-body', el);
+
+  // controles
+  $('.win-close', el).addEventListener('click', (e) => {
+    e.stopPropagation(); send({ type: 'close', id: w.id });
+  });
+  $('.win-min', el).addEventListener('click', (e) => {
+    e.stopPropagation(); send({ type: 'min', id: w.id });
+  });
+  $('.win-max', el).addEventListener('click', (e) => {
+    e.stopPropagation(); send({ type: 'max', id: w.id });
+  });
+  bar.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.win-controls')) return;
+    send({ type: 'focus', id: w.id });
+    startDrag(e, w);
+  });
+
+  return el;
+}
+
+function applyWindowState(entry, w) {
+  const el = entry.el;
+  const body = $('.win-body', el);
+  el.style.left = w.x + 'px';
+  el.style.top = w.y + 'px';
+  el.style.zIndex = w.z;
+  el.style.width = w.w + 'px';
+  el.style.height = w.h + 'px';
+
+  const minimized = w.min;
+  const maximized = w.max;
+  el.classList.toggle('maximized', !!maximized && !minimized);
+  el.style.display = minimized ? 'none' : '';
+
+  // renderizar conteudo do app (o PROCESSAMENTO ja veio do ESP32)
+  renderAppBody(body, w);
+}
+
+// ============================================================================
+// Apps - renderizacao (o estado/processamento vem do ESP32)
+// ============================================================================
+
+function renderAppBody(body, w) {
+  const app = w.app;
+  const data = w.data || {};
+
+  if (app === 'calc') {
+    body.className = 'win-body app-calc';
+    body.innerHTML = `
+      <div class="calc-display">${esc(data.display || '0')}</div>
+      <div class="calc-grid">
+        ${['C', '±', '%', '/'].map(k => `<button data-k="${k}" class="op">${k}</button>`).join('')}
+        ${['7','8','9','*'].map(k => `<button data-k="${k}">${k}</button>`).join('')}
+        ${['4','5','6','-'].map(k => `<button data-k="${k}">${k}</button>`).join('')}
+        ${['1','2','3','+'].map(k => `<button data-k="${k}">${k}</button>`).join('')}
+        <button data-k="0" class="span2">0</button>
+        <button data-k=".">.</button>
+        <button data-k="=" class="eq">=</button>
+      </div>
+    `;
+    $$('button', body).forEach(btn => {
+      btn.addEventListener('click', () => send({ type: 'app', id: w.id, action: { action: 'key', key: btn.dataset.k } }));
+    });
     return;
   }
-  const id = nextId++;
-  const el = document.createElement('div');
-  el.className = 'window active';
-  el.style.zIndex = ++topZ;
-  el.style.left = (40 + (windows.length % 5) * 30) + 'px';
-  el.style.top = (30 + (windows.length % 4) * 24) + 'px';
-  el.style.width = '420px';
-  el.style.height = '460px';
 
-  const body = document.createElement('div');
-  body.className = 'window-body';
-
-  el.innerHTML = `
-    <div class="window-titlebar">
-      <span class="window-title-icon">${meta.icon}</span>
-      <span class="window-title-text">${meta.title}</span>
-      <div class="window-controls">
-        <button class="window-btn" data-act="min">—</button>
-        <button class="window-btn" data-act="max">▢</button>
-        <button class="window-btn close" data-act="close">✕</button>
-      </div>
-    </div>
-  `;
-  el.appendChild(body);
-
-  const titlebar = $('.window-titlebar', el);
-  titlebar.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.window-controls')) return;
-    startDrag(e, el);
-  });
-
-  // Controls
-  $$('.window-btn', el).forEach(btn => {
-    btn.addEventListener('mousedown', ev => ev.stopPropagation());
-    btn.addEventListener('click', () => {
-      const act = btn.dataset.act;
-      if (act === 'close') closeWindow(id);
-      else if (act === 'min') minimizeWindow(id);
-      else if (act === 'max') toggleMaximize(id);
+  if (app === 'notepad') {
+    body.className = 'win-body app-notepad';
+    body.innerHTML = '<textarea placeholder="Escreva aqui..."></textarea>';
+    const ta = $('textarea', body);
+    ta.value = data.text || '';
+    const sendTimer = { t: null };
+    ta.addEventListener('input', () => {
+      clearTimeout(sendTimer.t);
+      sendTimer.t = setTimeout(() => {
+        send({ type: 'app', id: w.id, action: { action: 'text', text: ta.value } });
+      }, 200);
     });
-  });
-
-  el.addEventListener('mousedown', () => activateWindow(id));
-
-  DOM.windowHost.appendChild(el);
-  const win = { id, appId, el, body, minimized: false, maximized: false };
-  windows.push(win);
-  openedApps[appId] = id;
-  buildAppContent(win);
-  updateTaskbar();
-  return win;
-}
-
-function closeWindow(id) {
-  const w = windows.find(x => x.id === id);
-  if (!w) return;
-  w.el.remove();
-  windows = windows.filter(x => x.id !== id);
-  if (openedApps[w.appId] === id) delete openedApps[w.appId];
-  updateTaskbar();
-}
-
-function minimizeWindow(id) {
-  const w = windows.find(x => x.id === id);
-  if (!w) return;
-  w.el.classList.add('hidden');
-  w.minimized = true;
-  updateTaskbar();
-}
-
-function toggleMaximize(id) {
-  const w = windows.find(x => x.id === id);
-  if (!w) return;
-  w.maximized = !w.maximized;
-  if (w.maximized) {
-    w._restore = { left: w.el.style.left, top: w.el.style.top, w: w.el.style.width, h: w.el.style.height };
-    w.el.style.left = '0';
-    w.el.style.top = '0';
-    w.el.style.width = '100vw';
-    w.el.style.height = 'calc(100vh - 48px)';
-    w.el.style.borderRadius = '0';
-  } else {
-    Object.assign(w.el.style, w._restore);
-    w.el.style.borderRadius = '10px 10px 8px 8px';
+    return;
   }
-}
 
-function updateTaskbar() {
-  DOM.taskbarTasks.innerHTML = '';
-  windows.forEach(w => {
-    const meta = APP_META[w.appId];
-    const btn = document.createElement('div');
-    btn.className = 'taskbar-task' + (w.el.classList.contains('active') ? ' active' : '');
-    btn.innerHTML = `${meta.icon} ${esc(meta.title)}`;
-    btn.addEventListener('click', () => {
-      if (w.el.classList.contains('hidden')) {
-        w.el.classList.remove('hidden');
-        w.minimized = false;
-        activateWindow(w.id);
-      } else {
-        activateWindow(w.id);
+  if (app === 'terminal') {
+    body.className = 'win-body app-terminal';
+    body.innerHTML = `
+      <pre class="term-out">${esc(data.output || '')}</pre>
+      <div class="term-inline">
+        <span class="term-prompt">${esc(data.prompt || 'espax> ')}</span>
+        <input class="term-input" autocomplete="off" spellcheck="false">
+      </div>
+    `;
+    const inp = $('.term-input', body);
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        send({ type: 'app', id: w.id, action: { action: 'cmd', cmd: inp.value } });
+        inp.value = '';
       }
     });
-    DOM.taskbarTasks.appendChild(btn);
-  });
-}
-
-// ---------- Drag ----------
-function startDrag(e, el) {
-  if (el.classList.contains('maximized')) return;
-  const win = windows.find(x => x.el === el);
-  if (!win) return;
-  activateWindow(win.id);
-  const rect = el.getBoundingClientRect();
-  const dx = e.clientX - rect.left;
-  const dy = e.clientY - rect.top;
-  function move(ev) {
-    el.style.left = (ev.clientX - dx) + 'px';
-    el.style.top = (ev.clientY - dy) + 'px';
+    inp.focus();
+    return;
   }
-  function up() {
-    document.removeEventListener('mousemove', move);
-    document.removeEventListener('mouseup', up);
-  }
-  document.addEventListener('mousemove', move);
-  document.addEventListener('mouseup', up);
-}
 
-// ---------- Build app content ----------
-function buildAppContent(win) {
-  switch (win.appId) {
-    case 'calc': buildCalc(win); break;
-    case 'notepad': buildNotepad(win); break;
-    case 'terminal': buildTerminal(win); break;
-    case 'browser': buildBrowser(win); break;
-    case 'files': buildFiles(win); break;
-    case 'settings': buildSettings(win); break;
-    case 'about': buildAbout(win); break;
-  }
-}
-
-// ==================================================
-// CALCULATOR
-// ==================================================
-function buildCalc(win) {
-  let expr = '';
-  win.body.innerHTML = `
-    <div class="calc">
-      <div class="calc-display" id="disp">0</div>
-      <div class="calc-grid">
-        <button class="clear" data-k="C">C</button>
-        <button class="op" data-k="(">(</button>
-        <button class="op" data-k=")">)</button>
-        <button class="op" data-k="/">÷</button>
-        <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
-        <button class="op" data-k="*">×</button>
-        <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
-        <button class="op" data-k="-">−</button>
-        <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
-        <button class="op" data-k="+">+</button>
-        <button data-k="0" class="zero-col">0</button>
-        <button data-k=".">.</button>
-        <button class="eq" data-k="=">=</button>
-      </div>
-    </div>
-  `;
-  const disp = $('#disp', win.body);
-  function update() {
-    disp.textContent = expr === '' ? '0' : expr;
-    disp.scrollLeft = disp.scrollWidth;
-  }
-  $$('.calc-grid button', win.body).forEach(btn => {
-    btn.addEventListener('click', () => {
-      const k = btn.dataset.k;
-      if (k === 'C') { expr = ''; update(); return; }
-      if (k === '=') {
-        try {
-          // translate for JS eval
-          let e = expr.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-');
-          // validate
-          if (!/^[0-9+\-*/().\s]*$/.test(e)) throw new Error();
-          const result = Function('"use strict"; return (' + e + ')')();
-          expr = String(parseFloat(result.toPrecision(12)));
-        } catch { expr = 'Erro'; }
-        update();
-        return;
-      }
-      if (expr === 'Erro') expr = '';
-      expr += k;
-      update();
-    });
-  });
-}
-
-// ==================================================
-// NOTEPAD
-// ==================================================
-function buildNotepad(win) {
-  win.body.innerHTML = `
-    <div class="notepad" style="height:100%;display:flex;flex-direction:column;">
-      <div class="notepad-toolbar">
-        <button id="np-save">💾 Salvar</button>
-        <button id="np-new">🧹 Limpar</button>
-        <span style="font-size:11px;color:var(--muted)" id="np-status"></span>
-      </div>
-      <div style="flex:1;display:flex;">
-        <textarea id="np-area" placeholder="Digite seu texto aqui..."></textarea>
-      </div>
-    </div>
-  `;
-  const area = $('#np-area', win.body);
-  const status = $('#np-status', win.body);
-
-  $('#np-new', win.body).addEventListener('click', () => {
-    area.value = '';
-    status.textContent = 'Novo documento';
-  });
-
-  $('#np-save', win.body).addEventListener('click', async () => {
-    await saveNotepad(area.value);
-    status.textContent = 'Salvo!';
-    setTimeout(() => status.textContent = '', 1500);
-  });
-  // load existing memo on open
-  (async () => {
-    try {
-      const res = await api('/api/notepad');
-      if (res && res.ok) { area.value = res.content || ''; status.textContent = 'Bloco de notas local'; }
-    } catch {}
-  })();
-}
-
-async function saveNotepad(content) {
-  await api('/api/notepad', 'POST', { content });
-}
-
-// ==================================================
-// TERMINAL
-// ==================================================
-// TERMINAL
-// ==================================================
-function buildTerminal(win) {
-  win.body.innerHTML = `
-    <div class="terminal">
-      <div class="terminal-output" id="term-out"></div>
-      <div class="terminal-input">
-        <span class="terminal-prompt">user@espax:~$</span>
-        <input id="term-in" autocomplete="off" spellcheck="false">
-      </div>
-    </div>
-  `;
-  const out = $('#term-out', win.body);
-  const input = $('#term-in', win.body);
-  const banner = `
-ESPax Terminal v1.0
-Digite 'help' para comandos. É um terminal remoto do ESP32.
-`;
-  out.textContent = banner;
-  out.scrollTop = out.scrollHeight;
-
-  input.addEventListener('keydown', async (e) => {
-    if (e.key !== 'Enter') return;
-    const cmd = input.value;
-    input.value = '';
-    out.textContent += `\nuser@espax:~$ ${cmd}\n`;
-    out.scrollTop = out.scrollHeight;
-
-    // local helpers
-    const c = cmd.trim();
-    if (!c) return;
-    if (['help', 'clear', 'status'].includes(c)) {
-      handleLocalCommand(c, out);
-      return;
-    }
-    try {
-      await api('/api/send', 'POST', { cmd });
-      out.textContent += `[comando enviado ao ESP32 via serial]\n`;
-    } catch (err) {
-      out.textContent += `erro: ${err.message}\n`;
-    }
-    out.scrollTop = out.scrollHeight;
-  });
-  setTimeout(() => input.focus(), 100);
-}
-
-async function refreshSystemInfo() {
-  try {
-    const s = await api('/api/status');
-    if (s.ok) { sysName = s.name; }
-  } catch {}
-}
-
-async function handleLocalCommand(c, out) {
-  if (c === 'help') {
-    out.textContent += `Comandos locais: help, clear, status\n`;
-  } else if (c === 'clear') {
-    out.textContent = '';
-  } else if (c === 'status') {
-    try {
-      const s = await api('/api/status');
-      out.textContent += `Nome: ${s.name}\nHostname: ${s.hostname}\nIP: ${s.ip}\nHeap: ${s.heap} bytes\nUptime: ${s.uptime}s\nChip: ${s.chip.model} @${s.chip.frequency}MHz (${s.chip.cores} cores)\nFlash: ${prettyBytes(s.chip.flash_size)}\n`;
-    } catch (err) { out.textContent += `erro: ${err.message}\n`; }
-  }
-}
-
-// ==================================================
-// BROWSER
-// ==================================================
-function buildBrowser(win) {
-  win.body.innerHTML = `
-    <div class="browser">
-      <div class="browser-bar">
-        <input class="browser-url" id="b-url" placeholder="Digite uma URL (ex: https://exemplo.com)">
-        <button class="browser-go" id="b-go">Ir</button>
-      </div>
-      <iframe class="browser-frame" id="b-frame" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
-    </div>
-  `;
-  const url = $('#b-url', win.body);
-  const frame = $('#b-frame', win.body);
-  function go() {
-    let u = url.value.trim();
-    if (!u) return;
-    if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
-    frame.src = u;
-  }
-  $('#b-go', win.body).addEventListener('click', go);
-  url.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
-}
-
-// ==================================================
-// FILES
-// ==================================================
-function buildFiles(win) {
-  win.body.innerHTML = `
-    <div class="files">
-      <div class="files-toolbar">
-        <button id="f-refresh">🔄 Atualizar</button>
-        <button id="f-upload">⬆️ Upload</button>
-      </div>
-      <div class="files-list" id="f-list"></div>
-      <input type="file" id="f-file" style="display:none">
-    </div>
-  `;
-  const list = $('#f-list', win.body);
-  const uploadInput = $('#f-file', win.body);
-
-  function render(files) {
-    list.innerHTML = '';
-    if (!files.length) {
-      list.innerHTML = '<div class="file-row" style="color:var(--muted)">Nenhum arquivo no sistema.</div>';
+  if (app === 'files') {
+    body.className = 'win-body app-files';
+    body.innerHTML = '<div class="file-list"></div>';
+    const list = $('.file-list', body);
+    const files = w.files || w.data && w.data.files || [];
+    if (files.length === 0) {
+      list.innerHTML = '<div class="file-empty">Pasta vazia</div>';
       return;
     }
     files.forEach(f => {
       const row = document.createElement('div');
       row.className = 'file-row';
-      row.innerHTML = `
-        <span class="file-name">📄 ${esc(f.name)}</span>
-        <span style="color:var(--muted);font-size:12px">${prettyBytes(f.size)}</span>
-      `;
+      row.innerHTML = `<span class="file-ico">📄</span><span class="file-name">${esc(f.name)}</span><span class="file-size">${prettyBytes(f.size)}</span>`;
       list.appendChild(row);
     });
+    return;
   }
 
-  async function load() {
-    try {
-      const res = await api('/api/files');
-      render(res.files);
-    } catch {}
+  if (app === 'settings') {
+    body.className = 'win-body app-settings';
+    body.innerHTML = `
+      <div class="set-row"><label>Nome</label><input id="s-name" value="${esc(data.name || '')}"></div>
+      <div class="set-row"><label>Hostname</label><input id="s-host" value="${esc(data.hostname || '')}"></div>
+      <div class="set-row"><label>WiFi SSID</label><input id="s-ssid" value="${esc(data.ssid || '')}"></div>
+      <div class="set-row"><label>IP</label><span class="set-static">${esc(data.ip || '')}</span></div>
+      <div class="set-row"><label>Uptime</label><span class="set-static">${data.uptime || 0}s</span></div>
+      <button id="s-save">Salvar</button>
+    `;
+    return;
   }
-  $('#f-refresh', win.body).addEventListener('click', load);
-  load();
 
-  $('#f-upload', win.body).addEventListener('click', () => uploadInput.click());
-  uploadInput.addEventListener('change', async () => {
-    const file = uploadInput.files[0];
-    if (!file) return;
-    const fd = new FormData();
-    fd.append('file', file);
-    try {
-      await fetch('/api/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: fd });
-    } catch {}
-    load();
-  });
-}
-
-// ==================================================
-// SETTINGS
-// ==================================================
-function buildSettings(win) {
-  win.body.innerHTML = `
-    <div class="settings-list">
-      <div class="settings-field">
-        <label>Nome do sistema</label>
-        <input id="s-name" placeholder="ESPax">
-      </div>
-      <div class="settings-field">
-        <label>Hostname (sem .local) *</label>
-        <input id="s-host" placeholder="espax">
-      </div>
-      <div class="settings-field">
-        <label>Usuário de login</label>
-        <input id="s-user" placeholder="admin">
-      </div>
-      <div class="settings-field">
-        <label>Nova senha</label>
-        <input id="s-pass" type="password" placeholder="••••••">
-      </div>
-      <div class="settings-field">
-        <label>WiFi SSID *</label>
-        <input id="s-wssid" placeholder="minha-rede">
-      </div>
-      <div class="settings-field">
-        <label>WiFi Senha *</label>
-        <input id="s-wpass" type="password" placeholder="senha-wifi">
-      </div>
-      <button class="settings-save" id="s-save">Salvar configurações</button>
-      <div id="s-msg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
-    </div>
-    <div style="margin-top:14px;font-size:11px;color:var(--muted)">
-      * Campos de rede exigem reboot para aplicar. Você também pode configurar tudo via serial.
-    </div>
-  `;
-  $('#s-save', win.body).addEventListener('click', async () => {
-    const body = {
-      name: $('#s-name', win.body).value.trim(),
-      hostname: $('#s-host', win.body).value.trim(),
-      user: $('#s-user', win.body).value.trim(),
-      pass: $('#s-pass', win.body).value,
-      wifi_ssid: $('#s-wssid', win.body).value.trim(),
-      wifi_pass: $('#s-wpass', win.body).value,
-    };
-    const msg = $('#s-msg', win.body);
-    try {
-      const res = await api('/api/settings', 'POST', body);
-      msg.style.color = 'var(--success)';
-      msg.textContent = res.msg || 'Salvo!';
-    } catch (err) {
-      msg.style.color = 'var(--danger)';
-      msg.textContent = 'Erro ao salvar.';
-    }
-  });
-}
-
-// ==================================================
-// ABOUT
-// ==================================================
-async function buildAbout(win) {
-  win.body.innerHTML = `
-    <div class="about-hero">
+  if (app === 'about' || app === 'info') {
+    body.className = 'win-body app-about';
+    body.innerHTML = `
       <div class="about-logo">ESP<span>ax</span></div>
-      <div style="color:var(--muted);font-size:13px">Web Desktop System v1.0</div>
-    </div>
-    <div class="about-stats">
-      <div class="stat-row"><span class="k">Nome</span><b id="a-name">—</b></div>
-      <div class="stat-row"><span class="k">Hostname</span><b id="a-host">—</b></div>
-      <div class="stat-row"><span class="k">IP</span><b id="a-ip">—</b></div>
-      <div class="stat-row"><span class="k">Chip</span><b id="a-chip">—</b></div>
-      <div class="stat-row"><span class="k">Frequência</span><b id="a-freq">—</b></div>
-      <div class="stat-row"><span class="k">Flash</span><b id="a-flash">—</b></div>
-      <div class="stat-row"><span class="k">RAM livre</span><b id="a-ram">—</b></div>
-      <div class="stat-row"><span class="k">Uptime</span><b id="a-up">—</b></div>
-    </div>
-    <div style="margin-top:16px;text-align:center">
-      <button id="a-reboot" style="padding:9px 16px;border:none;border-radius:6px;background:#fecaca;color:#991b1b;font-weight:600;cursor:pointer">Reiniciar ESP32</button>
-    </div>
-  `;
-  try {
-    const s = await api('/api/status');
-    $('#a-name', win.body).textContent = s.name;
-    $('#a-host', win.body).textContent = s.hostname;
-    $('#a-ip', win.body).textContent = s.ip;
-    $('#a-chip', win.body).textContent = s.chip.model;
-    $('#a-freq', win.body).textContent = s.chip.frequency + ' MHz';
-    $('#a-flash', win.body).textContent = prettyBytes(s.chip.flash_size);
-    $('#a-ram', win.body).textContent = prettyBytes(s.heap);
-    $('#a-up', win.body).textContent = s.uptime + 's';
-  } catch {}
-  $('#a-reboot', win.body).addEventListener('click', async () => {
-    await api('/api/reboot', 'POST');
+      <p>Web Desktop System v1.1</p>
+      <p>Processamento: <b>ESP32</b></p>
+      <p>Renderizacao: <b>Browser</b></p>
+      <table class="info-table">
+        <tr><td>Nome</td><td>${esc(data.name || '')}</td></tr>
+        <tr><td>Hostname</td><td>${esc(data.hostname || '')}</td></tr>
+        <tr><td>IP</td><td>${esc(data.ip || '')}</td></tr>
+        <tr><td>WiFi</td><td>${esc(data.ssid || '')}</td></tr>
+        <tr><td>Chip</td><td>${esc(data.chip ? data.chip.model : '')}</td></tr>
+        <tr><td>Freq</td><td>${data.chip && data.chip.frequency ? data.chip.frequency + ' MHz' : ''}</td></tr>
+        <tr><td>Heap</td><td>${prettyBytes(data.heap || 0)}</td></tr>
+        <tr><td>Uptime</td><td>${(data.uptime || 0)}s</td></tr>
+      </table>
+    `;
+    return;
+  }
+
+  // app desconhecido
+  body.className = 'win-body';
+  body.innerHTML = `<p>App não disponível: <b>${esc(app)}</b></p>`;
+}
+
+// ============================================================================
+// Arrastar / redimensionar (inputs -> ESP32)
+// ============================================================================
+
+function startDrag(e, w) {
+  const startX = e.clientX, startY = e.clientY;
+  const origX = w.x, origY = w.y;
+
+  const move = (ev) => {
+    const dx = ev.clientX - startX;
+    const dy = ev.clientY - startY;
+    send({ type: 'move', id: w.id, x: origX + dx, y: origY + dy });
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
+// ============================================================================
+// Taskbar
+// ============================================================================
+
+function renderTaskbar(order) {
+  DOM.taskbarTasks.innerHTML = '';
+  order.forEach(w => {
+    const btn = document.createElement('button');
+    btn.className = 'task-btn' + (w.min ? '' : '');
+    btn.textContent = w.title;
+    btn.addEventListener('click', () => {
+      if (w.min) send({ type: 'restore', id: w.id });
+      else send({ type: 'min', id: w.id });
+    });
+    DOM.taskbarTasks.appendChild(btn);
   });
 }
 
-// ---------- Desktop icons ----------
+// ============================================================================
+// Escaping HTML
+// ============================================================================
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ============================================================================
+// Icons + Start
+// ============================================================================
+
 $$('.icon', DOM.desktopIcons).forEach(icon => {
-  icon.addEventListener('dblclick', () => createWindow(icon.dataset.app));
-  icon.addEventListener('click', () => {
-    // single click select highlight styling (optional)
-  });
+  icon.addEventListener('dblclick', () => send({ type: 'open', app: icon.dataset.app }));
 });
 
-// ---------- Init ----------
 DOM.startButton.addEventListener('click', () => {
-  // open start menu - open About
-  createWindow('about');
+  send({ type: 'open', app: 'about' });
 });
 
-// Ao carregar: esconde a tela de "Iniciando ESPax..." e mostra o login.
+// ============================================================================
+// Init
+// ============================================================================
+
 DOM.loadingScreen.classList.add('hidden');
 DOM.loginScreen.classList.remove('hidden');
+connectWS();
