@@ -627,6 +627,91 @@ function handleUpload(input) {
 
 Veja `apps/hello-world/` para um exemplo funcional.
 
+## Atualizacoes OTA (Over-The-Air)
+
+O ESP32 pode verificar e instalar atualizacoes diretamente do GitHub, sem precisar de cabo USB.
+
+### Como funciona
+
+1. O ESP32 busca `version.json` no GitHub (raw)
+2. Compara a versao atual com a latest
+3. Se houver nova versao, baixa o firmware.bin
+4. Instala e reinicia automaticamente
+
+### Publicar uma atualizacao
+
+1. Compile o firmware no seu PC:
+   ```bash
+   pio run
+   ```
+
+2. O firmware compilado fica em:
+   ```
+   .pio/build/esp32dev/firmware.bin
+   ```
+
+3. Crie uma release no GitHub:
+   - Va em Releases > Create new release
+   - Tag: `v1.2.0` (versao nova)
+   - Title: `v1.2.0`
+   - Upload o `firmware.bin` como asset
+   - Publish
+
+4. Atualize o `version.json` na raiz do repo:
+   ```json
+   {
+     "version": "1.2.0",
+     "binUrl": "https://github.com/usuario/repo/releases/download/v1.2.0/firmware.bin",
+     "changelog": "Descricao da atualizacao"
+   }
+   ```
+
+5. Faça push do `version.json`:
+   ```bash
+   git add version.json
+   git commit -m "Update to v1.2.0"
+   git push
+   ```
+
+6. O ESP32 verifica automaticamente (ou o usuario clica "Buscar Atualizacoes" no app Sobre)
+
+### Arquivo version.json
+
+```json
+{
+  "version": "1.2.0",
+  "binUrl": "https://github.com/usuario/repo/releases/download/v1.2.0/firmware.bin",
+  "changelog": "Descricao do que mudou"
+}
+```
+
+- `version`: versao semver (ex: "1.2.0")
+- `binUrl`: URL direta para o arquivo .bin do firmware
+- `changelog`: descricao das mudancas (opcional)
+
+### API HTTP
+
+| Metodo | Endpoint | Descricao |
+|--------|----------|-----------|
+| GET | `/api/check-update` | Verifica nova versao |
+| POST | `/api/install-update` | Instala firmware (body: `url=...`) |
+
+### WebSocket
+
+| Tipo | Descricao |
+|------|-----------|
+| `check_update` | Verifica nova versao |
+| `install_update` | Instala firmware (campo: `binUrl`) |
+| `update_info` | Resposta com info da versao |
+| `update_progress` | Progresso da instalacao |
+
+### Limitacoes
+
+- O ESP32 nao compila (impossivel no hardware). O firmware deve ser compilado no PC e enviado ao GitHub.
+- Timeout de 10 segundos para download
+- Firmware maximo: ~500KB (espaco disponivel na flash)
+- Cache do GitHub raw: ~5 minutos
+
 ## Limitacoes
 
 - Maximo de 6 janelas simultaneas
