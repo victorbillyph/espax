@@ -511,11 +511,17 @@ function renderAppBody(body, w, state) {
       gattLog.scrollTop = gattLog.scrollHeight;
     }
 
+    let btScanInterval = null;
+
     scanBtn.addEventListener('click', () => {
       send({ type: 'bt_scan', duration: 10 });
       statusEl.textContent = 'Escaneando...';
       scanBtn.style.display = 'none';
       stopBtn.style.display = '';
+      // polling: pedir dispositivos a cada 2s durante o scan
+      if (btScanInterval) clearInterval(btScanInterval);
+      btScanInterval = setInterval(() => send({ type: 'bt_devices' }), 2000);
+      setTimeout(() => { if (btScanInterval) { clearInterval(btScanInterval); btScanInterval = null; } }, 11000);
     });
 
     stopBtn.addEventListener('click', () => {
@@ -523,6 +529,7 @@ function renderAppBody(body, w, state) {
       statusEl.textContent = 'Parado';
       scanBtn.style.display = '';
       stopBtn.style.display = 'none';
+      if (btScanInterval) { clearInterval(btScanInterval); btScanInterval = null; }
     });
 
     discBtn.addEventListener('click', () => {

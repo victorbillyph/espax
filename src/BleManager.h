@@ -45,12 +45,12 @@ public:
   bool unsubscribeNotify(String charUuid);
   void loop();
 
-  BLEScan* pScan;
-  BLEClient* pClient;
   std::vector<BtDevice> devices;
   std::vector<BtService> services;
   std::vector<BtCharacteristic> characteristics;
   int connectedIdx;
   bool scanning;
   uint32_t scanEndMs;
+  BLEScan* pScan;
+  BLEClient* pClient;
 };

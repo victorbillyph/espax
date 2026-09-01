@@ -1,6 +1,18 @@
 #include "BleManager.h"
 
 static BluetoothManager* gBtMgr = nullptr;
+static bool bleInitialized = false;
+static SemaphoreHandle_t scanMutex = NULL;
+
+static void scanTask(void* param) {
+  BluetoothManager* mgr = (BluetoothManager*)param;
+  Serial.println("[BLE] scan task started");
+  BLEScanResults results = mgr->pScan->start(8, false);
+  int count = results.getCount();
+  Serial.printf("[BLE] scan done: %d devices\n", count);
+  mgr->scanning = false;
+  vTaskDelete(NULL);
+}
 
 static class : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice dev) override {
@@ -28,10 +40,15 @@ BluetoothManager::BluetoothManager()
 }
 
 void BluetoothManager::startScan(uint32_t duration) {
+  if (scanning) return;
   devices.clear();
   services.clear();
   characteristics.clear();
-  BLEDevice::init("ESPax");
+
+  if (!bleInitialized) {
+    BLEDevice::init("ESPax");
+    bleInitialized = true;
+  }
   pScan = BLEDevice::getScan();
   pScan->setAdvertisedDeviceCallbacks(&scanCallbacks, false);
   pScan->setInterval(134);
@@ -39,7 +56,8 @@ void BluetoothManager::startScan(uint32_t duration) {
   pScan->setActiveScan(true);
   scanning = true;
   scanEndMs = millis() + duration * 1000;
-  pScan->start(duration, nullptr, false);
+
+  xTaskCreatePinnedToCore(scanTask, "ble_sc", 16384, this, 1, NULL, 0);
 }
 
 void BluetoothManager::stopScan() {
@@ -51,18 +69,15 @@ void BluetoothManager::stopScan() {
 
 bool BluetoothManager::connectToDevice(int index) {
   if (index < 0 || index >= (int)devices.size()) return false;
-
   disconnect();
   BLEAddress addr(devices[index].address.c_str());
   pClient = BLEDevice::createClient();
   pClient->setClientCallbacks(&clientCallbacks);
-
   if (!pClient->connect(addr)) {
     delete pClient;
     pClient = nullptr;
     return false;
   }
-
   connectedIdx = index;
   devices[index].connected = true;
   discoverServices();
@@ -96,7 +111,6 @@ void BluetoothManager::discoverServices() {
   for (auto& [uuid, svc] : *svcMap) {
     BtService s;
     s.uuid = String(uuid.c_str());
-
     String u = s.uuid;
     u.toUpperCase();
     if (u.indexOf("180F") >= 0) s.name = "Battery Service";
@@ -123,23 +137,17 @@ void BluetoothManager::discoverServices() {
 
 String BluetoothManager::readCharacteristic(String charUuid) {
   if (!pClient || !pClient->isConnected()) return "";
-
   for (auto& s : services) {
     BLERemoteService* svc = pClient->getService(BLEUUID(s.uuid.c_str()));
     if (!svc) continue;
     BLERemoteCharacteristic* ch = svc->getCharacteristic(BLEUUID(charUuid.c_str()));
     if (!ch || !ch->canRead()) continue;
-
     std::string val = ch->readValue();
     String result = "";
     for (size_t i = 0; i < val.length(); i++) {
       char c = val[i];
       if (c >= 32 && c < 127) result += c;
-      else {
-        char buf[5];
-        snprintf(buf, sizeof(buf), "\\x%02x", (uint8_t)c);
-        result += buf;
-      }
+      else { char buf[5]; snprintf(buf, sizeof(buf), "\\x%02x", (uint8_t)c); result += buf; }
     }
     return result;
   }
@@ -148,7 +156,6 @@ String BluetoothManager::readCharacteristic(String charUuid) {
 
 bool BluetoothManager::writeCharacteristic(String charUuid, String data) {
   if (!pClient || !pClient->isConnected()) return false;
-
   for (auto& s : services) {
     BLERemoteService* svc = pClient->getService(BLEUUID(s.uuid.c_str()));
     if (!svc) continue;
@@ -162,18 +169,13 @@ bool BluetoothManager::writeCharacteristic(String charUuid, String data) {
 
 bool BluetoothManager::subscribeNotify(String charUuid) {
   if (!pClient || !pClient->isConnected()) return false;
-
   for (auto& s : services) {
     BLERemoteService* svc = pClient->getService(BLEUUID(s.uuid.c_str()));
     if (!svc) continue;
     BLERemoteCharacteristic* ch = svc->getCharacteristic(BLEUUID(charUuid.c_str()));
     if (!ch || !ch->canNotify()) continue;
-
     BLERemoteDescriptor* desc = ch->getDescriptor(BLEUUID((uint16_t)0x2902));
-    if (desc) {
-      uint8_t val[] = {0x01, 0x00};
-      desc->writeValue(val, 2);
-    }
+    if (desc) { uint8_t val[] = {0x01, 0x00}; desc->writeValue(val, 2); }
     return true;
   }
   return false;
@@ -181,18 +183,13 @@ bool BluetoothManager::subscribeNotify(String charUuid) {
 
 bool BluetoothManager::unsubscribeNotify(String charUuid) {
   if (!pClient || !pClient->isConnected()) return false;
-
   for (auto& s : services) {
     BLERemoteService* svc = pClient->getService(BLEUUID(s.uuid.c_str()));
     if (!svc) continue;
     BLERemoteCharacteristic* ch = svc->getCharacteristic(BLEUUID(charUuid.c_str()));
     if (!ch) continue;
-
     BLERemoteDescriptor* desc = ch->getDescriptor(BLEUUID((uint16_t)0x2902));
-    if (desc) {
-      uint8_t val[] = {0x00, 0x00};
-      desc->writeValue(val, 2);
-    }
+    if (desc) { uint8_t val[] = {0x00, 0x00}; desc->writeValue(val, 2); }
     return true;
   }
   return false;
