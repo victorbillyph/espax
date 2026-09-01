@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESPax</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- ====== LOGIN SCREEN ====== -->
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-box">
+      <div class="login-logo">ESP<span>ax</span></div>
+      <div class="login-subtitle" id="login-name">Web Desktop System</div>
+      <form id="login-form">
+        <input type="text" id="login-user" placeholder="Usuário" autocomplete="username">
+        <input type="password" id="login-pass" placeholder="Senha" autocomplete="current-password">
+        <button type="submit">Entrar</button>
+        <div id="login-error" class="login-error"></div>
+      </form>
+      <div class="login-footer">ESPax Web Desktop v1.0</div>
+    </div>
+  </div>
+
+  <!-- ====== LOADING ====== -->
+  <div id="loading-screen" class="login-screen">
+    <div class="login-box">
+      <div class="loading-spinner"></div>
+      <div class="login-subtitle">Iniciando ESPax...</div>
+    </div>
+  </div>
+
+  <!-- ====== DESKTOP ====== -->
+  <div id="desktop" class="desktop hidden">
+
+    <!-- Wallpaper / Icons -->
+    <div class="desktop-icons" id="desktop-icons">
+      <div class="icon" data-app="files">
+        <div class="icon-img">📁</div>
+        <div class="icon-label">Arquivos</div>
+      </div>
+      <div class="icon" data-app="browser">
+        <div class="icon-img">🌐</div>
+        <div class="icon-label">Browser</div>
+      </div>
+      <div class="icon" data-app="calc">
+        <div class="icon-img">🧮</div>
+        <div class="icon-label">Calculadora</div>
+      </div>
+      <div class="icon" data-app="notepad">
+        <div class="icon-img">📝</div>
+        <div class="icon-label">Bloco de Notas</div>
+      </div>
+      <div class="icon" data-app="terminal">
+        <div class="icon-img">🖥️</div>
+        <div class="icon-label">Terminal</div>
+      </div>
+      <div class="icon" data-app="settings">
+        <div class="icon-img">⚙️</div>
+        <div class="icon-label">Configurações</div>
+      </div>
+      <div class="icon" data-app="about">
+        <div class="icon-img">ℹ️</div>
+        <div class="icon-label">Sobre</div>
+      </div>
+    </div>
+
+    <!-- Taskbar -->
+    <div class="taskbar">
+      <div class="taskbar-start" id="start-button">
+        <span class="start-logo">ESP<span>ax</span></span>
+      </div>
+      <div class="taskbar-tasks" id="taskbar-tasks"></div>
+      <div class="taskbar-right">
+        <span id="taskbar-clock">--:--</span>
+        <span id="taskbar-date"></span>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="window-host"></div>
+
+  <!-- Terminal output buffer prerendered in index -->
+  <script src="/app.js"></script>
+</body>
+</html>
