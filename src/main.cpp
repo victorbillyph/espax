@@ -1010,12 +1010,7 @@ void setup() {
   server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", html_index);
   });
-  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/css", loadFile("/style.css"));
-  });
-  server.on("/app.js", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "application/javascript", loadFile("/app.js"));
-  });
+  server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/login",
     [](AsyncWebServerRequest *request, JsonVariant &json) {
