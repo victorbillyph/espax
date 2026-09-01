@@ -81,6 +81,8 @@ static void processSerialLine(const String &lineIn) {
     Serial.println("  reset wifi           - reseta e entra em modo AP");
     Serial.println("  reboot               - reinicia o ESP32");
     Serial.println("  clear                - limpa a tela");
+    Serial.println("  scan                 - lista redes WiFi disponiveis");
+    Serial.println("  ping / info          - protocolo interno do ESPax tools");
     return;
   }
 
@@ -100,6 +102,46 @@ static void processSerialLine(const String &lineIn) {
     Serial.printf("  Tempo online: %lu segundos\n", millis() / 1000);
     Serial.printf("  Memory heap: %d bytes livres\n", ESP.getFreeHeap());
     Serial.println(" ==================== ");
+    return;
+  }
+
+  // ping - protocolo de deteccao do ESPax tools
+  if (lower == "ping") {
+    Serial.println("[ESPax] pong");
+    return;
+  }
+
+  // info - informacoes de configuracao (para o script de setup)
+  if (lower == "info" || lower == "cfg") {
+    Serial.printf("[CFG] %s\n", wifi_ssid);
+    Serial.printf("[NAME] %s\n", sys_name);
+    return;
+  }
+
+  // scan - lista redes WiFi disponiveis (protocolo ESPax tools)
+  if (lower == "scan") {
+    Serial.println("[SCAN] iniciando");
+    // O scan de redes exige que o STA esteja ativo. Se estamos so em AP
+    // (modo AP puro), mudar temporariamente para AP_STA para o scan funcionar
+    // sem travar o stack WiFi do ESP32.
+    bool wasAp = (WiFi.getMode() & WIFI_AP) != 0;
+    bool wasSta = (WiFi.getMode() & WIFI_STA) != 0;
+    if (!wasSta) {
+      if (wasAp) WiFi.mode(WIFI_AP_STA);
+      else WiFi.mode(WIFI_STA);
+      delay(200);
+    }
+    int n = WiFi.scanNetworks();
+    for (int i = 0; i < n; i++) {
+      Serial.printf("[NET] %s|%d|%d\n",
+        WiFi.SSID(i).c_str(),
+        WiFi.RSSI(i),
+        (int)WiFi.encryptionType(i));
+    }
+    WiFi.scanDelete();
+    // restaura o modo original
+    if (wasAp && !wasSta) WiFi.mode(WIFI_AP);
+    Serial.println("[SCAN] fim");
     return;
   }
 

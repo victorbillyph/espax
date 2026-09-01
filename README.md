@@ -53,6 +53,38 @@ pio device monitor
 
 O **uploadfs** é obrigatório — sem ele o desktop não carrega (a árvore web mora no LittleFS).
 
+## ESPax Tools (script de instalação/configuração)
+
+O script `espax.sh` automatiza procura, instalação e configuração do ESP32 via porta serial USB.
+
+```bash
+./espax.sh                 # procura a porta sozinho
+./espax.sh /dev/ttyUSB0    # usa uma porta especifica
+```
+
+Ele detecta a porta serial (/dev/ttyUSB* /dev/ttyACM*), envia `ping` e:
+
+- **É um ESPax** → informa se já está configurado;
+  - já configurado → menu de **ajustes** ou **formatar**;
+  - não configurado → **setup wizard** (lista redes WiFi via `scan`, pede senha,
+    usuário/senha de login, nome, hostname, salva e reinicia).
+- **Não é um ESPax** → pergunta se quer instalar;
+  - se sim, baixa o ESPax do GitHub, grava firmware + LittleFS via PlatformIO;
+  - se não, sai sem alterar nada.
+
+A comunicação serial usa o helper `espax-serial.py` (baseado em `pyserial`), que
+mantém a porta em estado RUN para não desligar o chip (comum no CH340).
+
+Pré-requisitos: `git`, `python3` com **`pyserial`** e **`platformio`**, e permissão
+na porta serial (usuário no grupo `dialout`/`uucp`). Usa o `.venv/bin/python` e o
+`.venv/bin/pio` do próprio projeto se existirem.
+
+```bash
+# preparar ambiente (venv) e dependencias
+python3 -m venv .venv
+.venv/bin/pip install -U platformio pyserial
+```
+
 ## Primeira vez (Access Point)
 
 1. Grave firmware + filesystem.
