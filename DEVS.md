@@ -245,6 +245,260 @@ O ESP32 se comunica via WebSocket em `/ws`.
 - **Persistencia**: para salvar dados, use o notepad ou crie um endpoint customizado.
 - **Seguranca**: apps de repos sao executados no browser. Nao instale apps de fontes nao confiaveis.
 
+## Comunicacao com o ESP32
+
+Apps customizados podem se comunicar com o ESP32 de 3 formas: HTTP API, WebSocket, e Upload/Download de arquivos.
+
+### Requisicoes API (HTTP)
+
+O ESP32 expoe endpoints HTTP que podem ser chamados via `fetch()`:
+
+```javascript
+// Ler status do sistema
+const res = await fetch('/api/status');
+const data = await res.json();
+console.log(data.name, data.heap, data.uptime);
+
+// Ler bloco de notas
+const notepad = await fetch('/api/notepad');
+const { content } = await notepad.json();
+
+// Salvar bloco de notas
+await fetch('/api/notepad', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ content: 'Meu texto' })
+});
+
+// Listar arquivos
+const files = await fetch('/api/files');
+const { files: list } = await files.json();
+```
+
+**Endpoints disponiveis:**
+
+| Metodo | Endpoint | Descricao |
+|--------|----------|-----------|
+| GET | `/api/status` | Info do sistema (nome, heap, chip, etc) |
+| GET | `/api/notepad` | Ler conteudo do notepad |
+| POST | `/api/notepad` | Salvar conteudo do notepad |
+| GET | `/api/files` | Listar arquivos do LittleFS |
+| POST | `/api/reboot` | Reiniciar ESP32 |
+
+**Nota:** Os endpoints exigem autenticacao. O token e gerenciado automaticamente pelo ESPax. Apps customizados rodam dentro do contexto autenticado.
+
+### WebSocket (comunicacao em tempo real)
+
+Para comunicacao bidirecional, use o WebSocket que ja esta aberto:
+
+```javascript
+// Enviar mensagem para o ESP32
+window.parent.postMessage({
+  type: 'app',
+  id: WINDOW_ID,
+  action: { action: 'meucomando', param: 'valor' }
+}, '*');
+
+// Ou usar a conexao WebSocket diretamente (se acessivel)
+```
+
+**Dica:** Para apps que precisam de atualizacoes em tempo real (sensores, status), o WebSocket e mais eficiente que polling HTTP.
+
+### Download de Arquivos
+
+Para baixar arquivos do ESP32:
+
+```javascript
+// Download de um arquivo
+async function downloadFile(filename) {
+  const res = await fetch('/api/files');
+  const { files } = await res.json();
+
+  // Encontrar o arquivo
+  const file = files.find(f => f.name === filename);
+  if (!file) {
+    alert('Arquivo nao encontrado');
+    return;
+  }
+
+  // Criar link de download
+  // Nota: o ESP32 nao serve arquivos diretamente por nome
+  // Use o conteudo do notepad ou endpoints customizados
+  alert(`Arquivo: ${file.name} (${file.size} bytes)`);
+}
+```
+
+**Para servir arquivos customizados**, crie um endpoint no firmware:
+
+```cpp
+// No main.cpp
+server.on("/api/myfile", HTTP_GET, [](AsyncWebServerRequest *request) {
+  if (!checkAuth()) {
+    request->send(401, "application/json", "{\"ok\":false}");
+    return;
+  }
+  File f = LittleFS.open("/meu_arquivo.txt", "r");
+  if (f) {
+    String content = f.readString();
+    f.close();
+    request->send(200, "text/plain", content);
+  } {
+    request->send(404, "text/plain", "Not found");
+  }
+});
+```
+
+E no app:
+
+```javascript
+const res = await fetch('/api/myfile');
+const content = await res.text();
+document.getElementById('output').textContent = content;
+```
+
+### Upload de Arquivos
+
+Para enviar arquivos do browser para o ESP32:
+
+```javascript
+// Upload de arquivo
+async function uploadFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('name', file.name);
+
+  const res = await fetch('/api/upload', {
+    method: 'POST',
+    body: formData
+  });
+
+  const result = await res.json();
+  if (result.ok) {
+    alert('Arquivo enviado com sucesso!');
+  } else {
+    alert('Erro ao enviar: ' + (result.msg || 'desconhecido'));
+  }
+}
+
+// Input de arquivo no HTML
+// <input type="file" id="file-input" onchange="handleUpload(this)">
+function handleUpload(input) {
+  const file = input.files[0];
+  if (file) uploadFile(file);
+}
+```
+
+**Exemplo completo com input:**
+
+```html
+<div style="padding: 16px;">
+  <h3>Upload de Arquivo</h3>
+  <input type="file" id="file-input"
+    style="margin: 10px 0;">
+  <button onclick="doUpload()">Enviar</button>
+  <div id="status" style="
+    margin-top: 10px; padding: 8px;
+    background: #f8fafc; border-radius: 6px;
+    font-size: 13px;
+  "></div>
+
+  <script>
+    async function doUpload() {
+      const input = document.getElementById('file-input');
+      const file = input.files[0];
+      if (!file) {
+        alert('Selecione um arquivo');
+        return;
+      }
+
+      const status = document.getElementById('status');
+      status.textContent = 'Enviando...';
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('name', file.name);
+
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const result = await res.json();
+        status.textContent = result.ok
+          ? 'Enviado com sucesso!'
+          : 'Erro: ' + result.msg;
+      } catch (err) {
+        status.textContent = 'Erro de conexao';
+      }
+    }
+  </script>
+</div>
+```
+
+**Limitacoes do upload:**
+- Tamanho maximo: depende da memoria disponivel (~100KB recomendado)
+- Formato: qualquer arquivo (texto, imagem, etc)
+- Destino: LittleFS (armazenamento persistente do ESP32)
+- Auth: requer token de autenticacao
+
+### Exemplo: App com API + Upload
+
+```html
+<div style="padding: 16px; font-family: sans-serif;">
+  <h2 style="color: #0f172a;">Meu App Completo</h2>
+
+  <!-- Status do sistema -->
+  <div id="status" style="
+    padding: 12px; background: #f8fafc;
+    border-radius: 8px; margin: 12px 0;
+    font-size: 13px;
+  ">Carregando...</div>
+
+  <!-- Upload -->
+  <input type="file" id="file-input">
+  <button onclick="upload()">Enviar</button>
+
+  <!-- Lista de arquivos -->
+  <div id="files" style="
+    margin-top: 12px; font-size: 13px;
+  "></div>
+
+  <script>
+    // Carregar status ao abrir
+    async function init() {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      document.getElementById('status').innerHTML =
+        `<b>${data.name}</b> | Heap: ${data.heap} bytes | Uptime: ${data.uptime}s`;
+    }
+
+    // Upload
+    async function upload() {
+      const file = document.getElementById('file-input').files[0];
+      if (!file) return alert('Selecione um arquivo');
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('name', file.name);
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const r = await res.json();
+      alert(r.ok ? 'Enviado!' : 'Erro: ' + r.msg);
+      loadFiles();
+    }
+
+    // Listar arquivos
+    async function loadFiles() {
+      const res = await fetch('/api/files');
+      const { files } = await res.json();
+      document.getElementById('files').innerHTML =
+        files.map(f => `<div>${f.name} (${f.size} bytes)</div>`).join('');
+    }
+
+    init();
+    loadFiles();
+  </script>
+</div>
+```
+
 ## Exemplo Completo
 
 Veja `apps/hello-world/` para um exemplo funcional.
