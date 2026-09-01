@@ -2,99 +2,194 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0f172a">
   <title>ESPax</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-
-  <!-- ====== LOGIN SCREEN ====== -->
-  <div id="login-screen" class="login-screen hidden">
-    <div class="login-box">
-      <div class="login-logo">ESP<span>ax</span></div>
-      <div class="login-subtitle" id="login-name">Web Desktop System</div>
-      <form id="login-form">
-        <input type="text" id="login-user" placeholder="Usuário" autocomplete="username">
-        <input type="password" id="login-pass" placeholder="Senha" autocomplete="current-password">
-        <button type="submit">Entrar</button>
-        <div id="login-error" class="login-error"></div>
-      </form>
-      <div class="login-footer">ESPax Web Desktop v1.0</div>
+  <!-- Status Bar -->
+  <div class="statusbar" id="statusbar">
+    <div class="sb-left">
+      <span id="sb-time">--:--</span>
+    </div>
+    <div class="sb-center" id="sb-page-title">Dashboard</div>
+    <div class="sb-right">
+      <span class="sb-wifi" id="sb-wifi">&#9679;</span>
+      <span id="sb-battery">100%</span>
     </div>
   </div>
 
-  <!-- ====== LOADING ====== -->
-  <div id="loading-screen" class="login-screen">
-    <div class="login-box">
-      <div class="loading-spinner"></div>
-      <div class="login-subtitle">Iniciando ESPax...</div>
+  <!-- Pages -->
+  <div class="pages" id="pages">
+    <!-- Dashboard -->
+    <div class="page active" id="page-dashboard">
+      <div class="dash-header">
+        <div class="dash-greeting" id="dash-greeting">ESPax</div>
+        <div class="dash-sub" id="dash-sub">Sistema operacional de bolso</div>
+      </div>
+      <div class="dash-grid" id="dash-grid">
+        <div class="dash-card card-info">
+          <div class="card-icon">&#128187;</div>
+          <div class="card-label">Sistema</div>
+          <div class="card-value" id="card-cpu">--</div>
+          <div class="card-sub" id="card-chip">ESP32</div>
+        </div>
+        <div class="dash-card card-mem">
+          <div class="card-icon">&#128190;</div>
+          <div class="card-label">RAM</div>
+          <div class="card-value" id="card-ram">--</div>
+          <div class="card-bar"><div class="card-bar-fill" id="card-ram-bar"></div></div>
+        </div>
+        <div class="dash-card card-net">
+          <div class="card-icon">&#127760;</div>
+          <div class="card-label">Rede</div>
+          <div class="card-value" id="card-ip">--</div>
+          <div class="card-sub" id="card-ssid">WiFi</div>
+        </div>
+        <div class="dash-card card-up">
+          <div class="card-icon">&#9201;</div>
+          <div class="card-label">Uptime</div>
+          <div class="card-value" id="card-uptime">--</div>
+        </div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-title">Apps Instalados</div>
+        <div class="dash-apps" id="dash-apps">
+          <div class="dash-empty">Nenhum app instalado</div>
+        </div>
+      </div>
     </div>
+
+    <!-- Bluetooth -->
+    <div class="page" id="page-bluetooth">
+      <div class="bt-toolbar">
+        <button class="btn btn-primary" id="bt-scan-btn">Scan</button>
+        <button class="btn btn-danger" id="bt-stop-btn" style="display:none">Parar</button>
+        <span class="bt-status" id="bt-status">Pronto</span>
+      </div>
+      <div class="bt-list" id="bt-devices">
+        <div class="empty-state">Toque em Scan para encontrar dispositivos BLE</div>
+      </div>
+      <!-- Detail view -->
+      <div class="bt-detail" id="bt-detail" style="display:none">
+        <div class="bt-detail-header">
+          <button class="btn btn-icon" id="bt-back-btn">&#8592;</button>
+          <div>
+            <div class="bt-detail-name" id="bt-detail-name">-</div>
+            <div class="bt-detail-addr" id="bt-detail-addr">-</div>
+          </div>
+          <button class="btn btn-danger btn-sm" id="bt-disconnect-btn">Desconectar</button>
+        </div>
+        <div class="bt-services" id="bt-services"></div>
+        <div class="bt-gatt-section">
+          <div class="bt-gatt-title">GATT Operations</div>
+          <div class="bt-gatt-row">
+            <select class="bt-select" id="bt-char-select">
+              <option value="">Selecione characteristic...</option>
+            </select>
+          </div>
+          <div class="bt-gatt-row">
+            <button class="btn btn-primary btn-sm" id="bt-read-btn">Read</button>
+            <input class="bt-input" id="bt-write-data" placeholder="dados (hex/texto)">
+            <button class="btn btn-primary btn-sm" id="bt-write-btn">Write</button>
+          </div>
+          <div class="bt-gatt-row">
+            <button class="btn btn-sm" id="bt-notify-btn">Notify ON</button>
+            <button class="btn btn-sm" id="bt-notify-off-btn">Notify OFF</button>
+          </div>
+          <div class="bt-log" id="bt-log"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- App Store -->
+    <div class="page" id="page-appstore">
+      <div class="as-header">
+        <div class="as-tabs">
+          <button class="as-tab active" data-tab="zip">Instalar</button>
+          <button class="as-tab" data-tab="installed">Meus Apps</button>
+        </div>
+      </div>
+      <div class="as-content" id="as-content"></div>
+    </div>
+
+    <!-- Settings -->
+    <div class="page" id="page-settings">
+      <div class="settings-list">
+        <div class="settings-group">
+          <div class="settings-title">Sistema</div>
+          <div class="settings-item">
+            <span>Nome</span>
+            <span id="cfg-hostname" class="settings-val">espax</span>
+          </div>
+          <div class="settings-item">
+            <span>Versao</span>
+            <span id="cfg-version" class="settings-val">-</span>
+          </div>
+          <div class="settings-item">
+            <span>Chip</span>
+            <span id="cfg-chip" class="settings-val">ESP32</span>
+          </div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-title">WiFi</div>
+          <div class="settings-item">
+            <span>SSID</span>
+            <span id="cfg-ssid" class="settings-val">-</span>
+          </div>
+          <div class="settings-item">
+            <span>IP</span>
+            <span id="cfg-ip" class="settings-val">-</span>
+          </div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-title">Atualizacao</div>
+          <div class="settings-item clickable" id="cfg-check-update">
+            <span>Buscar atualizacoes</span>
+            <span id="update-status" class="settings-val">-</span>
+          </div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-title">Acoes</div>
+          <div class="settings-item clickable" id="cfg-reboot">
+            <span>Reiniciar</span>
+            <span class="settings-val">&#8250;</span>
+          </div>
+          <div class="settings-item clickable" id="cfg-wifi-reset">
+            <span>Reconfigurar WiFi</span>
+            <span class="settings-val">&#8250;</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- App Page (dynamic) -->
+    <div class="page" id="page-app" style="display:none"></div>
   </div>
 
-  <!-- ====== DESKTOP ====== -->
-  <div id="desktop" class="desktop hidden">
-
-    <!-- Wallpaper / Icons -->
-    <div class="desktop-icons" id="desktop-icons">
-      <div class="icon" data-app="files">
-        <div class="icon-img">📁</div>
-        <div class="icon-label">Arquivos</div>
-      </div>
-      <div class="icon" data-app="browser">
-        <div class="icon-img">🌐</div>
-        <div class="icon-label">Browser</div>
-      </div>
-      <div class="icon" data-app="calc">
-        <div class="icon-img">🧮</div>
-        <div class="icon-label">Calculadora</div>
-      </div>
-      <div class="icon" data-app="notepad">
-        <div class="icon-img">📝</div>
-        <div class="icon-label">Bloco de Notas</div>
-      </div>
-      <div class="icon" data-app="terminal">
-        <div class="icon-img">🖥️</div>
-        <div class="icon-label">Terminal</div>
-      </div>
-      <div class="icon" data-app="settings">
-        <div class="icon-img">⚙️</div>
-        <div class="icon-label">Configurações</div>
-      </div>
-      <div class="icon" data-app="about">
-        <div class="icon-img">ℹ️</div>
-        <div class="icon-label">Sobre</div>
-      </div>
-      <div class="icon" data-app="taskmanager">
-        <div class="icon-img">📊</div>
-        <div class="icon-label">Tarefas</div>
-      </div>
-      <div class="icon" data-app="appstore">
-        <div class="icon-img">🛒</div>
-        <div class="icon-label">App Store</div>
-      </div>
-      <div class="icon" data-app="bluetooth">
-        <div class="icon-img">🔵</div>
-        <div class="icon-label">Bluetooth</div>
-      </div>
-    </div>
-
-    <!-- Taskbar -->
-    <div class="taskbar">
-      <div class="taskbar-start" id="start-button">
-        <span class="start-logo">ESP<span>ax</span></span>
-      </div>
-      <div class="taskbar-tasks" id="taskbar-tasks"></div>
-      <div class="taskbar-right">
-        <span id="taskbar-clock">--:--</span>
-        <span id="taskbar-date"></span>
-      </div>
-    </div>
-
+  <!-- Tab Bar -->
+  <div class="tabbar" id="tabbar">
+    <button class="tab active" data-page="dashboard">
+      <div class="tab-icon">&#127968;</div>
+      <div class="tab-label">Inicio</div>
+    </button>
+    <button class="tab" data-page="bluetooth">
+      <div class="tab-icon">&#128267;</div>
+      <div class="tab-label">Bluetooth</div>
+    </button>
+    <button class="tab" data-page="appstore">
+      <div class="tab-icon">&#128230;</div>
+      <div class="tab-label">Loja</div>
+    </button>
+    <button class="tab" data-page="settings">
+      <div class="tab-icon">&#9881;</div>
+      <div class="tab-label">Config</div>
+    </button>
   </div>
 
-  <div id="window-host"></div>
-
-  <!-- Terminal output buffer prerendered in index -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="/app.js"></script>
 </body>

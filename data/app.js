@@ -1,842 +1,456 @@
 // ============================================================================
-// ESPax - Thin Client
-// O ESP32 processa e mantem o estado (janelas, apps, dados).
-// Este arquivo apenas: renderiza o estado recebido e envia eventos de input.
-// Renderizacao (HTML) fica no browser; PROCESSAMENTO fica no ESP32.
+// ESPax - Mobile Dashboard Client
 // ============================================================================
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
 
-const DOM = {
-  loginScreen: $('#login-screen'),
-  loadingScreen: $('#loading-screen'),
-  desktop: $('#desktop'),
-  desktopIcons: $('#desktop-icons'),
-  taskbarTasks: $('#taskbar-tasks'),
-  taskbarClock: $('#taskbar-clock'),
-  taskbarDate: $('#taskbar-date'),
-  startButton: $('#start-button'),
-  loginForm: $('#login-form'),
-  loginUser: $('#login-user'),
-  loginPass: $('#login-pass'),
-  loginError: $('#login-error'),
-  loginName: $('#login-name'),
-  windowHost: $('#window-host'),
-};
-
-let sysName = 'ESPax';
-let authed = false;
 let ws = null;
 let wsReconnect = null;
-let appState = { repos: [], installed: [] };
-let btMsgHandler = null;
+let appState = {};
+let currentPage = 'dashboard';
+let sysName = 'ESPax';
 
-// ============================================================================
-// Comunicacao ESP32 (WebSocket)
-// ============================================================================
-
-function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-  }
-}
+// =================== WebSocket ===================
 
 function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen = () => {
-    console.log('[ESPax] websocket conectado');
-    ws.send(JSON.stringify({ type: 'appstore_list' }));
-  };
+  if (ws && ws.readyState <= 1) return;
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { console.log('[ws] connected'); };
   ws.onclose = () => {
-    console.log('[ESPax] websocket fechado, reconectando...');
-    // se nao autenticado, mostra login
-    if (!authed) showLogin();
+    console.log('[ws] closed');
     wsReconnect = setTimeout(connectWS, 3000);
   };
+  ws.onerror = () => {};
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
+
     if (msg.type === 'hello') {
       sysName = msg.name || sysName;
     } else if (msg.type === 'state') {
-      renderState(msg);
+      appState = msg;
+      renderDashboard();
+      renderSettings();
     } else if (msg.type === 'appstore_data') {
       appState.installed = msg.installed || [];
-    } else if (msg.type === 'update_info') {
-      const status = document.querySelector('#update-status');
-      if (status) {
-        if (msg.ok && msg.updateAvailable) {
-          status.innerHTML = `Nova versao: <b>${esc(msg.latest)}</b> (atual: ${esc(msg.current)})` +
-            `<br><button id="btn-install-update" style="margin-top:8px;padding:8px 16px;border:none;border-radius:6px;background:#22c55e;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Instalar</button>`;
-          status.style.color = '#22c55e';
-          status.querySelector('#btn-install-update').addEventListener('click', () => {
-            status.textContent = 'Instalando...';
-            send({ type: 'install_update', binUrl: msg.binUrl });
-          });
-        } else if (msg.ok) {
-          status.textContent = 'Firmware atualizado!';
-          status.style.color = '#22c55e';
-        } else {
-          status.textContent = 'Erro: ' + (msg.msg || 'desconhecido');
-          status.style.color = '#ef4444';
-        }
-      }
-    } else if (msg.type === 'update_progress') {
-      const status = document.querySelector('#update-status');
-      if (status) {
-        status.textContent = msg.msg || 'Atualizando...';
-        status.style.color = '#f59e0b';
-      }
+      renderDashboard();
     }
 
-    if (btMsgHandler) btMsgHandler(msg);
+    // forward to active page handler
+    if (currentPage === 'bluetooth' && btMsgHandler) btMsgHandler(msg);
+    if (currentPage === 'appstore') asMsgHandler(msg);
+    if (msg.type === 'update_info') handleUpdateInfo(msg);
   };
 }
 
-// ============================================================================
-// Login / Logout (via HTTP)
-// ============================================================================
+function send(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
 
-async function api(path, method = 'GET', body) {
-  const opts = { method };
-  if (body) {
-    opts.headers = { 'Content-Type': 'application/json' };
-    opts.body = JSON.stringify(body);
+// =================== Navigation ===================
+
+function navigate(page) {
+  currentPage = page;
+  $$('.page').forEach(p => p.classList.remove('active'));
+  $$('.tab').forEach(t => t.classList.remove('active'));
+
+  if (page === 'app') {
+    $('#page-app').classList.add('active');
+    $('#sb-page-title').textContent = appState._appTitle || 'App';
+  } else {
+    const el = $(`#page-${page}`);
+    if (el) el.classList.add('active');
+    const tab = $(`.tab[data-page="${page}"]`);
+    if (tab) tab.classList.add('active');
+    const titles = { dashboard: 'Dashboard', bluetooth: 'Bluetooth', appstore: 'Loja', settings: 'Config' };
+    $('#sb-page-title').textContent = titles[page] || page;
   }
-  const res = await fetch(path, opts);
-  let data = {};
-  try { data = await res.json(); } catch {}
-  return { ok: res.ok, ...data };
 }
 
-function showLogin() {
-  DOM.loadingScreen.classList.add('hidden');
-  DOM.loginScreen.classList.remove('hidden');
-  DOM.desktop.classList.add('hidden');
-  DOM.loginError.textContent = '';
-}
+// =================== Dashboard ===================
 
-function enterDesktop() {
-  authed = true;
-  DOM.loadingScreen.classList.add('hidden');
-  DOM.loginScreen.classList.add('hidden');
-  DOM.desktop.classList.remove('hidden');
+function renderDashboard() {
+  const s = appState;
+
+  // greeting
+  const h = new Date().getHours();
+  const greet = h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
+  $('#dash-greeting').textContent = `${greet}, ESPax`;
+  $('#dash-sub').textContent = `v${s.version || '?'}`;
+
+  // cards
+  if (s.chip) {
+    $('#card-cpu').textContent = `${s.chip.frequency}MHz`;
+    $('#card-chip').textContent = s.chip.model || 'ESP32';
+  }
+  if (s.heap !== undefined) {
+    const total = 327680;
+    const used = total - s.heap;
+    const pct = Math.round((used / total) * 100);
+    $('#card-ram').textContent = `${Math.round(s.heap / 1024)}KB`;
+    $('#card-ram-bar').style.width = `${pct}%`;
+  }
+  if (s.ip) {
+    $('#card-ip').textContent = s.ip;
+    $('#card-ssid').textContent = s.ssid || 'WiFi';
+  }
+  if (s.uptime !== undefined) {
+    const m = Math.floor(s.uptime / 60);
+    const h2 = Math.floor(m / 60);
+    const d = Math.floor(h2 / 24);
+    if (d > 0) $('#card-uptime').textContent = `${d}d ${h2 % 24}h`;
+    else if (h2 > 0) $('#card-uptime').textContent = `${h2}h ${m % 60}m`;
+    else $('#card-uptime').textContent = `${m}m`;
+  }
+
+  // installed apps
+  const apps = s.installed || [];
+  const dashApps = $('#dash-apps');
+  if (apps.length === 0) {
+    dashApps.innerHTML = '<div class="dash-empty">Nenhum app instalado</div>';
+  } else {
+    dashApps.innerHTML = apps.map(a => `
+      <div class="dash-app-card" data-app="${esc(a.id)}">
+        <div class="dash-app-icon">${esc(a.icon)}</div>
+        <div class="dash-app-info">
+          <div class="dash-app-name">${esc(a.name)}</div>
+          <div class="dash-app-desc">${esc(a.desc)}</div>
+        </div>
+      </div>
+    `).join('');
+    dashApps.querySelectorAll('.dash-app-card').forEach(el => {
+      el.addEventListener('click', () => openApp(el.dataset.app));
+    });
+  }
+
+  // clock
   updateClock();
-  setInterval(updateClock, 1000);
 }
 
-DOM.loginForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  DOM.loginError.textContent = '';
-  const user = DOM.loginUser.value.trim();
-  const pass = DOM.loginPass.value;
-  if (!user || !pass) { DOM.loginError.textContent = 'Preencha usuário e senha.'; return; }
-  enterDesktop();
-  // o estado completo chega pelo websocket apos o login
-});
-
-function logout() {
-  authed = false;
-  api('/api/logout', 'POST');
-  showLogin();
-  DOM.loginPass.value = '';
+function openApp(appId) {
+  const app = (appState.installed || []).find(a => a.id === appId);
+  if (!app) return;
+  appState._appTitle = app.name;
+  const page = $('#page-app');
+  page.innerHTML = app.template || `<div class="empty-state">${esc(app.name)}</div>`;
+  page.style.display = 'block';
+  navigate('app');
 }
 
 function updateClock() {
   const now = new Date();
-  DOM.taskbarClock.textContent = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-  DOM.taskbarDate.textContent = now.toLocaleDateString('pt-BR');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  $('#sb-time').textContent = `${hh}:${mm}`;
 }
 
-// ============================================================================
-// Renderizacao do estado (vindo do ESP32)
-// ============================================================================
+// =================== Settings ===================
 
-function prettyBytes(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
-  return (n / 1048576).toFixed(2) + ' MB';
+function renderSettings() {
+  const s = appState;
+  $('#cfg-hostname').textContent = s.hostname || 'espax';
+  $('#cfg-version').textContent = s.version || '-';
+  if (s.chip) $('#cfg-chip').textContent = s.chip.model || 'ESP32';
+  $('#cfg-ssid').textContent = s.ssid || '-';
+  $('#cfg-ip').textContent = s.ip || '-';
 }
 
-// Mapeia (app, id) -> componente DOM (janela atual)
-const windowEls = new Map(); // id -> { win, el }
-
-function renderState(state) {
-  sysName = state.name || sysName;
-  state.repos = appState.repos;
-  state.installed = appState.installed;
-  const order = state.windows
-    .slice()
-    .sort((a, b) => a.z - b.z);
-
-  // fechar janelas que nao existem mais no estado
-  const existing = new Set(order.map(w => w.id));
-  for (const [id, entry] of windowEls) {
-    if (!existing.has(id)) {
-      entry.el.remove();
-      windowEls.delete(id);
-    }
+function handleUpdateInfo(msg) {
+  const el = $('#update-status');
+  if (!el) return;
+  if (msg.ok && msg.updateAvailable) {
+    el.innerHTML = `v${msg.latest} disponivel <button class="btn btn-primary btn-sm" id="btn-install-update" style="margin-left:8px">Instalar</button>`;
+    el.style.color = 'var(--green)';
+    const btn = el.querySelector('#btn-install-update');
+    if (btn) btn.addEventListener('click', () => {
+      el.textContent = 'Instalando...';
+      send({ type: 'install_update', binUrl: msg.binUrl });
+    });
+  } else if (msg.ok) {
+    el.textContent = 'Atualizado!';
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = 'Erro';
+    el.style.color = 'var(--red)';
   }
-
-  // renderizar/criar cada janela
-  order.forEach(w => {
-    let entry = windowEls.get(w.id);
-    if (!entry) {
-      const el = createWindowEl(w);
-      entry = { w, el };
-      windowEls.set(w.id, entry);
-      DOM.windowHost.appendChild(el);
-    } else {
-      entry.w = w;
-    }
-    applyWindowState(entry, w, state);
-  });
-
-  renderTaskbar(order);
 }
 
-function createWindowEl(w) {
-  const el = document.createElement('div');
-  el.className = 'window';
-  el.innerHTML = `
-    <div class="titlebar">
-      <span class="title">${esc(w.title || w.app)}</span>
-      <span class="win-controls">
-        <button class="win-btn win-min" data-act="min">–</button>
-        <button class="win-btn win-max" data-act="max">▢</button>
-        <button class="win-btn win-close" data-act="close">✕</button>
-      </span>
-    </div>
-    <div class="win-body"></div>
-  `;
+// =================== App Store ===================
 
-  const bar = $('.titlebar', el);
-  const body = $('.win-body', el);
+let asTab = 'zip';
 
-  // controles
-  $('.win-close', el).addEventListener('click', (e) => {
-    e.stopPropagation(); send({ type: 'close', id: w.id });
-  });
-  $('.win-min', el).addEventListener('click', (e) => {
-    e.stopPropagation(); send({ type: 'min', id: w.id });
-  });
-  $('.win-max', el).addEventListener('click', (e) => {
-    e.stopPropagation(); send({ type: 'max', id: w.id });
-  });
-  bar.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('.win-controls')) return;
-    send({ type: 'focus', id: w.id });
-    startDrag(e, w);
-  });
-
-  return el;
+function asMsgHandler(msg) {
+  if (msg.type === 'appstore_browse') {
+    // (removed - no more browse)
+  }
 }
 
-function applyWindowState(entry, w, state) {
-  const el = entry.el;
-  const body = $('.win-body', el);
-  el.style.left = w.x + 'px';
-  el.style.top = w.y + 'px';
-  el.style.zIndex = w.z;
-  el.style.width = w.w + 'px';
-  el.style.height = w.h + 'px';
+function renderAppStore() {
+  const content = $('#as-content');
+  const installed = appState.installed || [];
 
-  const minimized = w.min;
-  const maximized = w.max;
-  el.classList.toggle('maximized', !!maximized && !minimized);
-  el.style.display = minimized ? 'none' : '';
-
-  // renderizar conteudo do app (o PROCESSAMENTO ja veio do ESP32)
-  renderAppBody(body, w, state);
-}
-
-// ============================================================================
-// Apps - renderizacao (o estado/processamento vem do ESP32)
-// ============================================================================
-
-function renderAppBody(body, w, state) {
-  const app = w.app;
-  const data = w.data || {};
-
-  if (app === 'calc') {
-    body.className = 'win-body app-calc';
-    body.innerHTML = `
-      <div class="calc-display">${esc(data.display || '0')}</div>
-      <div class="calc-grid">
-        ${['C', '±', '%', '/'].map(k => `<button data-k="${k}" class="op">${k}</button>`).join('')}
-        ${['7','8','9','*'].map(k => `<button data-k="${k}">${k}</button>`).join('')}
-        ${['4','5','6','-'].map(k => `<button data-k="${k}">${k}</button>`).join('')}
-        ${['1','2','3','+'].map(k => `<button data-k="${k}">${k}</button>`).join('')}
-        <button data-k="0" class="span2">0</button>
-        <button data-k=".">.</button>
-        <button data-k="=" class="eq">=</button>
+  if (asTab === 'zip') {
+    content.innerHTML = `
+      <div style="margin-bottom:12px">
+        <p style="color:var(--text3);font-size:13px;margin-bottom:12px">
+          Selecione um <b>.zip</b> com: manifest.json + template.html (+ style.css)
+        </p>
+        <input type="file" id="as-zip-input" accept=".zip" style="width:100%;margin-bottom:10px">
+        <button class="btn btn-primary" id="as-zip-btn" style="width:100%">Instalar</button>
+        <div id="as-zip-status" style="margin-top:8px;font-size:12px;color:var(--text3)"></div>
       </div>
     `;
-    $$('button', body).forEach(btn => {
-      btn.addEventListener('click', () => send({ type: 'app', id: w.id, action: { action: 'key', key: btn.dataset.k } }));
-    });
-    return;
-  }
-
-  if (app === 'notepad') {
-    body.className = 'win-body app-notepad';
-    body.innerHTML = '<textarea placeholder="Escreva aqui..."></textarea>';
-    const ta = $('textarea', body);
-    ta.value = data.text || '';
-    const sendTimer = { t: null };
-    ta.addEventListener('input', () => {
-      clearTimeout(sendTimer.t);
-      sendTimer.t = setTimeout(() => {
-        send({ type: 'app', id: w.id, action: { action: 'text', text: ta.value } });
-      }, 200);
-    });
-    return;
-  }
-
-  if (app === 'terminal') {
-    body.className = 'win-body app-terminal';
-    body.innerHTML = `
-      <pre class="term-out">${esc(data.output || '')}</pre>
-      <div class="term-inline">
-        <span class="term-prompt">${esc(data.prompt || 'espax> ')}</span>
-        <input class="term-input" autocomplete="off" spellcheck="false">
-      </div>
-    `;
-    const inp = $('.term-input', body);
-    inp.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        send({ type: 'app', id: w.id, action: { action: 'cmd', cmd: inp.value } });
-        inp.value = '';
-      }
-    });
-    inp.focus();
-    return;
-  }
-
-  if (app === 'files') {
-    body.className = 'win-body app-files';
-    body.innerHTML = '<div class="file-list"></div>';
-    const list = $('.file-list', body);
-    const files = w.files || w.data && w.data.files || [];
-    if (files.length === 0) {
-      list.innerHTML = '<div class="file-empty">Pasta vazia</div>';
+    $('#as-zip-btn').addEventListener('click', handleZipInstall);
+  } else {
+    if (installed.length === 0) {
+      content.innerHTML = '<div class="as-empty">Nenhum app instalado</div>';
       return;
     }
-    files.forEach(f => {
-      const row = document.createElement('div');
-      row.className = 'file-row';
-      row.innerHTML = `<span class="file-ico">📄</span><span class="file-name">${esc(f.name)}</span><span class="file-size">${prettyBytes(f.size)}</span>`;
-      list.appendChild(row);
+    content.innerHTML = installed.map(a => `
+      <div class="as-app-card">
+        <div class="as-app-icon">${esc(a.icon)}</div>
+        <div class="as-app-info">
+          <div class="as-app-name">${esc(a.name)}</div>
+          <div class="as-app-desc">${esc(a.desc)}</div>
+          <div class="as-app-meta">${esc(a.author || 'Desconhecido')} · v${esc(a.version || '1.0')}</div>
+          <div class="as-app-actions">
+            <button class="btn btn-primary btn-sm" data-app="${esc(a.id)}">Abrir</button>
+            <button class="btn btn-danger btn-sm" data-app="${esc(a.id)}">Remover</button>
+          </div>
+        </div>
+      </div>
+    `).join('');
+    content.querySelectorAll('.btn-primary[data-app]').forEach(btn => {
+      btn.addEventListener('click', () => openApp(btn.dataset.app));
     });
-    return;
-  }
-
-  if (app === 'settings') {
-    body.className = 'win-body app-settings';
-    body.innerHTML = `
-      <div class="set-row"><label>Nome</label><input id="s-name" value="${esc(data.name || '')}"></div>
-      <div class="set-row"><label>Hostname</label><input id="s-host" value="${esc(data.hostname || '')}"></div>
-      <div class="set-row"><label>WiFi SSID</label><input id="s-ssid" value="${esc(data.ssid || '')}"></div>
-      <div class="set-row"><label>IP</label><span class="set-static">${esc(data.ip || '')}</span></div>
-      <div class="set-row"><label>Uptime</label><span class="set-static">${data.uptime || 0}s</span></div>
-      <button id="s-save">Salvar</button>
-    `;
-    return;
-  }
-
-  if (app === 'about' || app === 'info') {
-    body.className = 'win-body app-about';
-    body.innerHTML = `
-      <div class="about-logo">ESP<span>ax</span></div>
-      <p>Web Desktop System v${esc(state.version || '?')}</p>
-      <p>Processamento: <b>ESP32</b></p>
-      <p>Renderizacao: <b>Browser</b></p>
-      <table class="info-table">
-        <tr><td>Nome</td><td>${esc(data.name || '')}</td></tr>
-        <tr><td>Hostname</td><td>${esc(data.hostname || '')}</td></tr>
-        <tr><td>Versao</td><td>${esc(state.version || '')}</td></tr>
-        <tr><td>IP</td><td>${esc(data.ip || '')}</td></tr>
-        <tr><td>WiFi</td><td>${esc(data.ssid || '')}</td></tr>
-        <tr><td>Chip</td><td>${esc(data.chip ? data.chip.model : '')}</td></tr>
-        <tr><td>Freq</td><td>${data.chip && data.chip.frequency ? data.chip.frequency + ' MHz' : ''}</td></tr>
-        <tr><td>Heap</td><td>${prettyBytes(data.heap || 0)}</td></tr>
-        <tr><td>Uptime</td><td>${(data.uptime || 0)}s</td></tr>
-      </table>
-      <div style="margin-top:16px;text-align:center">
-        <button id="about-update" style="
-          padding:10px 20px;border:none;border-radius:8px;
-          background:linear-gradient(135deg,var(--accent),var(--accent2));
-          color:#fff;font-weight:600;cursor:pointer;font-size:13px;
-        ">Buscar Atualizacoes</button>
-        <div id="update-status" style="margin-top:10px;font-size:12px;color:#94a3b8"></div>
-      </div>
-    `;
-    body.querySelector('#about-update').addEventListener('click', () => {
-      const status = body.querySelector('#update-status');
-      status.textContent = 'Verificando...';
-      status.style.color = '#94a3b8';
-      send({ type: 'check_update' });
+    content.querySelectorAll('.btn-danger[data-app]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        send({ type: 'appstore_uninstall', appId: btn.dataset.app });
+      });
     });
-    return;
   }
+}
 
-  if (app === 'taskmanager') {
-    body.className = 'win-body app-taskmanager';
-    const windows = state.windows || [];
-    const totalRAM = windows.reduce((s, w) => s + (w.ram || 0), 0);
-    const heap = state.heap || 0;
-    const heapMax = 320000;
-    const heapPct = Math.round((heap / heapMax) * 100);
-    const chip = state.chip || {};
-    const uptime = state.uptime || 0;
-    const h = Math.floor(uptime / 3600);
-    const m = Math.floor((uptime % 3600) / 60);
-    const sec = uptime % 60;
+async function handleZipInstall() {
+  const input = $('#as-zip-input');
+  const status = $('#as-zip-status');
+  const file = input.files[0];
+  if (!file) { status.textContent = 'Selecione um arquivo'; status.style.color = 'var(--red)'; return; }
+  if (!file.name.endsWith('.zip')) { status.textContent = 'Deve ser .zip'; status.style.color = 'var(--red)'; return; }
 
-    body.innerHTML = `
-      <div class="tm-section">
-        <div class="tm-header">Sistema</div>
-        <div class="tm-bars">
-          <div class="tm-bar-row">
-            <span class="tm-label">RAM Heap</span>
-            <div class="tm-bar"><div class="tm-fill" style="width:${100 - heapPct}%"></div></div>
-            <span class="tm-val">${prettyBytes(heap)} / 320 KB</span>
-          </div>
-          <div class="tm-bar-row">
-            <span class="tm-label">Janelas</span>
-            <div class="tm-bar"><div class="tm-fill tm-fill-purple" style="width:${(windows.length / 6) * 100}%"></div></div>
-            <span class="tm-val">${windows.length} / 6</span>
-          </div>
-          <div class="tm-bar-row">
-            <span class="tm-label">RAM Apps</span>
-            <div class="tm-bar"><div class="tm-fill tm-fill-cyan" style="width:${Math.min(100, (totalRAM / heapMax) * 100)}%"></div></div>
-            <span class="tm-val">${prettyBytes(totalRAM)}</span>
-          </div>
-        </div>
-      </div>
-      <div class="tm-section">
-        <div class="tm-header">Processos</div>
-        <div class="tm-process-list">
-          <div class="tm-proc tm-proc-head">
-            <span class="tm-proc-id">ID</span>
-            <span class="tm-proc-app">App</span>
-            <span class="tm-proc-ram">RAM</span>
-            <span class="tm-proc-status">Status</span>
-          </div>
-          ${windows.map(w => `
-            <div class="tm-proc">
-              <span class="tm-proc-id">#${w.id}</span>
-              <span class="tm-proc-app">${esc(w.title || w.app)}</span>
-              <span class="tm-proc-ram">${prettyBytes(w.ram || 0)}</span>
-              <span class="tm-proc-status ${w.min ? 'tm-minimized' : 'tm-running'}">${w.min ? 'Minimizado' : 'Executando'}</span>
-            </div>
-          `).join('')}
-          ${windows.length === 0 ? '<div class="tm-empty">Nenhum processo ativo</div>' : ''}
-        </div>
-      </div>
-      <div class="tm-section">
-        <div class="tm-header">Info</div>
-        <div class="tm-info-grid">
-          <div class="tm-info"><span class="tm-info-label">Uptime</span><span class="tm-info-val">${h}h ${m}m ${sec}s</span></div>
-          <div class="tm-info"><span class="tm-info-label">Chip</span><span class="tm-info-val">${esc(chip.model || '')}</span></div>
-          <div class="tm-info"><span class="tm-info-label">Freq</span><span class="tm-info-val">${chip.frequency || 0} MHz</span></div>
-          <div class="tm-info"><span class="tm-info-label">WiFi</span><span class="tm-info-val">${esc(state.ssid || 'N/A')}</span></div>
-          <div class="tm-info"><span class="tm-info-label">IP</span><span class="tm-info-val">${esc(state.ip || '')}</span></div>
-        </div>
-      </div>
-    `;
-    return;
-  }
-
-  if (app === 'bluetooth') {
-    body.className = 'win-body app-bluetooth';
-    body.innerHTML = `
-      <div class="bt-header">
-        <button class="as-btn" id="bt-scan-btn">Iniciar Scan</button>
-        <button class="as-btn" id="bt-stop-btn" style="display:none">Parar</button>
-        <button class="as-btn" id="bt-disconnect-btn" style="display:none">Desconectar</button>
-        <span id="bt-status" style="color:#94a3b8;font-size:12px;margin-left:8px">Pronto</span>
-      </div>
-      <div class="bt-content">
-        <div class="bt-panel" id="bt-devices-panel">
-          <div class="bt-panel-title">Dispositivos</div>
-          <div class="bt-list" id="bt-devices-list">
-            <div class="bt-empty">Nenhum dispositivo encontrado</div>
-          </div>
-        </div>
-        <div class="bt-panel" id="bt-detail-panel" style="display:none">
-          <div class="bt-panel-title" id="bt-detail-name">-</div>
-          <div class="bt-services" id="bt-services-list"></div>
-          <div class="bt-panel-title" style="margin-top:8px">GATT</div>
-          <div class="bt-gatt">
-            <div class="bt-gatt-row">
-              <select id="bt-char-select" class="bt-input" style="flex:1">
-                <option value="">Selecione uma characteristic...</option>
-              </select>
-              <button class="as-btn as-btn-sm" id="bt-read-btn">Read</button>
-            </div>
-            <div class="bt-gatt-row">
-              <input class="bt-input" id="bt-write-data" placeholder="Dados para escrever (hex ou texto)" style="flex:1">
-              <button class="as-btn as-btn-sm" id="bt-write-btn">Write</button>
-            </div>
-            <div class="bt-gatt-row">
-              <button class="as-btn as-btn-sm" id="bt-notify-btn">Notify ON</button>
-              <button class="as-btn as-btn-sm" id="bt-notify-off-btn">Notify OFF</button>
-            </div>
-            <div class="bt-gatt-log" id="bt-gatt-log"></div>
-          </div>
-        </div>
-      </div>
-    `;
-
-    const scanBtn = body.querySelector('#bt-scan-btn');
-    const stopBtn = body.querySelector('#bt-stop-btn');
-    const discBtn = body.querySelector('#bt-disconnect-btn');
-    const statusEl = body.querySelector('#bt-status');
-    const devList = body.querySelector('#bt-devices-list');
-    const detailPanel = body.querySelector('#bt-detail-panel');
-    const detailName = body.querySelector('#bt-detail-name');
-    const servicesList = body.querySelector('#bt-services-list');
-    const charSelect = body.querySelector('#bt-char-select');
-    const gattLog = body.querySelector('#bt-gatt-log');
-
-    let selectedCharUuid = '';
-
-    function logGatt(msg) {
-      const line = document.createElement('div');
-      line.textContent = msg;
-      gattLog.appendChild(line);
-      gattLog.scrollTop = gattLog.scrollHeight;
+  status.textContent = 'Extraindo...'; status.style.color = 'var(--yellow)';
+  try {
+    const zip = await JSZip.loadAsync(file);
+    function findFile(name) {
+      const lower = name.toLowerCase();
+      let found = null;
+      zip.forEach((path, entry) => { if (!found && path.toLowerCase().endsWith(lower)) found = entry; });
+      return found;
     }
 
-    let btScanInterval = null;
+    const mf = findFile('manifest.json');
+    if (!mf) { const f = []; zip.forEach(p => f.push(p)); status.textContent = 'Sem manifest.json. Arquivos: ' + f.join(', '); status.style.color = 'var(--red)'; return; }
+    const manifest = JSON.parse(await mf.async('string'));
 
-    scanBtn.addEventListener('click', () => {
-      send({ type: 'bt_scan', duration: 10 });
-      statusEl.textContent = 'Escaneando...';
-      scanBtn.style.display = 'none';
-      stopBtn.style.display = '';
-      // polling: pedir dispositivos a cada 2s durante o scan
-      if (btScanInterval) clearInterval(btScanInterval);
-      btScanInterval = setInterval(() => send({ type: 'bt_devices' }), 2000);
-      setTimeout(() => { if (btScanInterval) { clearInterval(btScanInterval); btScanInterval = null; } }, 11000);
+    const tf = findFile('template.html');
+    if (!tf) { status.textContent = 'Sem template.html'; status.style.color = 'var(--red)'; return; }
+    const template = await tf.async('string');
+    let css = ''; const cf = findFile('style.css'); if (cf) css = await cf.async('string');
+
+    const appId = manifest.id || file.name.replace('.zip', '');
+    status.textContent = 'Instalando ' + (manifest.name || appId) + '...';
+
+    send({
+      type: 'appstore_install_zip',
+      appId, name: manifest.name || appId,
+      desc: manifest.description || '', icon: manifest.icon || '📦',
+      author: manifest.author || '', version: manifest.version || '1.0',
+      template, css
     });
+    status.textContent = (manifest.name || appId) + ' instalado!';
+    status.style.color = 'var(--green)';
+  } catch (err) {
+    status.textContent = 'Erro: ' + err.message;
+    status.style.color = 'var(--red)';
+  }
+}
 
-    stopBtn.addEventListener('click', () => {
-      send({ type: 'bt_stop' });
-      statusEl.textContent = 'Parado';
-      scanBtn.style.display = '';
-      stopBtn.style.display = 'none';
-      if (btScanInterval) { clearInterval(btScanInterval); btScanInterval = null; }
-    });
+// =================== Bluetooth ===================
 
-    discBtn.addEventListener('click', () => {
-      send({ type: 'bt_disconnect' });
-      detailPanel.style.display = 'none';
-      discBtn.style.display = 'none';
-      statusEl.textContent = 'Desconectado';
-      charSelect.innerHTML = '<option value="">Selecione uma characteristic...</option>';
-    });
+let btMsgHandler = null;
+let btScanInterval = null;
 
-    body.querySelector('#bt-read-btn').addEventListener('click', () => {
-      if (selectedCharUuid) {
-        send({ type: 'bt_read', charUuid: selectedCharUuid });
-        logGatt('READ ' + selectedCharUuid.substring(0, 8) + '...');
-      }
-    });
+function initBluetooth() {
+  const scanBtn = $('#bt-scan-btn');
+  const stopBtn = $('#bt-stop-btn');
+  const statusEl = $('#bt-status');
+  const devList = $('#bt-devices');
+  const detail = $('#bt-detail');
+  const backBtn = $('#bt-back-btn');
+  const discBtn = $('#bt-disconnect-btn');
+  const charSelect = $('#bt-char-select');
+  const logEl = $('#bt-log');
 
-    body.querySelector('#bt-write-btn').addEventListener('click', () => {
-      const data = body.querySelector('#bt-write-data').value;
-      if (selectedCharUuid && data) {
-        send({ type: 'bt_write', charUuid: selectedCharUuid, data });
-        logGatt('WRITE ' + selectedCharUuid.substring(0, 8) + '...: ' + data);
-      }
-    });
+  let selectedChar = '';
 
-    body.querySelector('#bt-notify-btn').addEventListener('click', () => {
-      if (selectedCharUuid) {
-        send({ type: 'bt_notify', charUuid: selectedCharUuid, enable: true });
-        logGatt('NOTIFY ON ' + selectedCharUuid.substring(0, 8) + '...');
-      }
-    });
+  function log(msg) {
+    const d = document.createElement('div');
+    d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
 
-    body.querySelector('#bt-notify-off-btn').addEventListener('click', () => {
-      if (selectedCharUuid) {
-        send({ type: 'bt_notify', charUuid: selectedCharUuid, enable: false });
-        logGatt('NOTIFY OFF');
-      }
-    });
+  scanBtn.addEventListener('click', () => {
+    send({ type: 'bt_scan', duration: 10 });
+    statusEl.textContent = 'Escaneando...';
+    scanBtn.style.display = 'none';
+    stopBtn.style.display = '';
+    if (btScanInterval) clearInterval(btScanInterval);
+    btScanInterval = setInterval(() => send({ type: 'bt_devices' }), 2000);
+    setTimeout(() => { if (btScanInterval) { clearInterval(btScanInterval); btScanInterval = null; } }, 11000);
+  });
 
-    // handler para mensagens BLE
-    const btHandler = (msg) => {
-      if (msg.type === 'bt_devices') {
-        const devs = msg.devices || [];
-        if (devs.length === 0) {
-          devList.innerHTML = '<div class="bt-empty">Nenhum dispositivo encontrado</div>';
-        } else {
-          devList.innerHTML = devs.map((d, i) => `
-            <div class="bt-device ${d.connected ? 'bt-connected' : ''}" data-idx="${i}">
+  stopBtn.addEventListener('click', () => {
+    send({ type: 'bt_stop' });
+    statusEl.textContent = 'Parado';
+    scanBtn.style.display = '';
+    stopBtn.style.display = 'none';
+    if (btScanInterval) { clearInterval(btScanInterval); btScanInterval = null; }
+  });
+
+  backBtn.addEventListener('click', () => { detail.style.display = 'none'; });
+  discBtn.addEventListener('click', () => {
+    send({ type: 'bt_disconnect' });
+    detail.style.display = 'none';
+    statusEl.textContent = 'Desconectado';
+  });
+
+  $('#bt-read-btn').addEventListener('click', () => {
+    if (selectedChar) { send({ type: 'bt_read', charUuid: selectedChar }); log('READ ' + selectedChar.substring(0, 8)); }
+  });
+  $('#bt-write-btn').addEventListener('click', () => {
+    const data = $('#bt-write-data').value;
+    if (selectedChar && data) { send({ type: 'bt_write', charUuid: selectedChar, data }); log('WRITE ' + selectedChar.substring(0, 8) + ': ' + data); }
+  });
+  $('#bt-notify-btn').addEventListener('click', () => {
+    if (selectedChar) { send({ type: 'bt_notify', charUuid: selectedChar, enable: true }); log('NOTIFY ON'); }
+  });
+  $('#bt-notify-off-btn').addEventListener('click', () => {
+    if (selectedChar) { send({ type: 'bt_notify', charUuid: selectedChar, enable: false }); log('NOTIFY OFF'); }
+  });
+
+  btMsgHandler = (msg) => {
+    if (msg.type === 'bt_devices') {
+      const devs = msg.devices || [];
+      if (devs.length === 0) {
+        devList.innerHTML = '<div class="empty-state">Nenhum dispositivo encontrado</div>';
+      } else {
+        devList.innerHTML = devs.map((d, i) => `
+          <div class="bt-device ${d.connected ? 'connected' : ''}" data-idx="${i}">
+            <div class="bt-dev-icon">${d.connected ? '&#128268;' : '&#128267;'}</div>
+            <div class="bt-dev-info">
               <div class="bt-dev-name">${esc(d.name)}</div>
-              <div class="bt-dev-addr">${esc(d.address)} · ${d.rssi} dBm</div>
+              <div class="bt-dev-addr">${esc(d.address)}</div>
             </div>
-          `).join('');
-          devList.querySelectorAll('.bt-device').forEach(el => {
-            el.addEventListener('click', () => {
-              send({ type: 'bt_connect', index: parseInt(el.dataset.idx) });
-              statusEl.textContent = 'Conectando...';
-            });
-          });
-        }
-        scanBtn.style.display = '';
-        stopBtn.style.display = 'none';
-        statusEl.textContent = devs.length + ' dispositivo(s) encontrado(s)';
-      } else if (msg.type === 'bt_connected') {
-        if (msg.ok) {
-          statusEl.textContent = 'Conectado: ' + msg.name;
-          discBtn.style.display = '';
-          detailPanel.style.display = '';
-          detailName.textContent = msg.name + ' (' + msg.address + ')';
-          // pedir servicos
-          send({ type: 'bt_services' });
-        } else {
-          statusEl.textContent = 'Falha ao conectar';
-        }
-      } else if (msg.type === 'bt_services') {
-        const svcs = msg.services || [];
-        const chars = msg.characteristics || [];
-        servicesList.innerHTML = svcs.map(s => `
-          <div class="bt-service">
-            <div class="bt-svc-name">${esc(s.name)}</div>
-            <div class="bt-svc-uuid">${esc(s.uuid)}</div>
-            ${s.chars.map(c => `<div class="bt-char-uuid">${esc(c)}</div>`).join('')}
+            <div class="bt-dev-rssi">${d.rssi} dBm</div>
           </div>
         `).join('');
-
-        charSelect.innerHTML = '<option value="">Selecione uma characteristic...</option>';
-        chars.forEach(c => {
-          const props = [c.read ? 'R' : '', c.write ? 'W' : '', c.notify ? 'N' : ''].filter(Boolean).join('');
-          const opt = document.createElement('option');
-          opt.value = c.uuid;
-          opt.textContent = c.uuid.substring(0, 8) + '... [' + props + ']';
-          charSelect.appendChild(opt);
-        });
-        charSelect.addEventListener('change', () => {
-          selectedCharUuid = charSelect.value;
-        });
-      } else if (msg.type === 'bt_read_result') {
-        logGatt('READ [' + msg.charUuid.substring(0, 8) + '] = ' + (msg.value || '(vazio)'));
-      } else if (msg.type === 'bt_write_result') {
-        logGatt('WRITE [' + msg.charUuid.substring(0, 8) + '] ' + (msg.ok ? 'OK' : 'FALHA'));
-      } else if (msg.type === 'bt_notify_result') {
-        logGatt('NOTIFY [' + msg.charUuid.substring(0, 8) + '] ' + (msg.ok ? 'OK' : 'FALHA'));
-      }
-    };
-
-    // registrar handler temporario
-    btMsgHandler = btHandler;
-    return;
-  }
-
-  if (app === 'appstore') {
-    body.className = 'win-body app-appstore';
-    const installed = state.installed || [];
-
-    body.innerHTML = `
-      <div class="as-tabs">
-        <button class="as-tab active" data-tab="zip">Instalar ZIP</button>
-        <button class="as-tab" data-tab="installed">Instalados</button>
-      </div>
-      <div class="as-content" id="as-content"></div>
-    `;
-    const content = body.querySelector('#as-content');
-    const tabs = body.querySelectorAll('.as-tab');
-
-    function showZip() {
-      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'zip'));
-      content.innerHTML = `
-        <div class="as-section">
-          <p style="color:#94a3b8;font-size:13px;margin-bottom:12px">
-            Selecione um arquivo .zip contendo: <b>manifest.json</b> + <b>template.html</b> (+ <b>style.css</b> opcional)
-          </p>
-          <div class="as-row">
-            <input type="file" id="as-zip-input" accept=".zip" style="
-              flex:1;padding:10px;background:rgba(255,255,255,0.06);
-              border:1px solid rgba(255,255,255,0.1);border-radius:8px;
-              color:#e2e8f0;font-size:13px;
-            ">
-            <button class="as-btn" id="as-zip-btn">Instalar</button>
-          </div>
-          <div id="as-zip-status" style="margin-top:10px;font-size:12px;color:#94a3b8"></div>
-        </div>
-      `;
-      content.querySelector('#as-zip-btn').addEventListener('click', async () => {
-        const input = content.querySelector('#as-zip-input');
-        const status = content.querySelector('#as-zip-status');
-        const file = input.files[0];
-        if (!file) { status.textContent = 'Selecione um arquivo .zip'; status.style.color = '#ef4444'; return; }
-        if (!file.name.endsWith('.zip')) { status.textContent = 'Arquivo deve ser .zip'; status.style.color = '#ef4444'; return; }
-
-        status.textContent = 'Extraindo...';
-        status.style.color = '#f59e0b';
-
-        try {
-          const zip = await JSZip.loadAsync(file);
-
-          // buscar arquivo no zip (case-insensitive, inclui subpastas)
-          function findFile(name) {
-            const lower = name.toLowerCase();
-            let found = null;
-            zip.forEach((path, entry) => {
-              if (!found && path.toLowerCase().endsWith(lower)) found = entry;
-            });
-            return found;
-          }
-
-          // ler manifest.json
-          const manifestFile = findFile('manifest.json');
-          if (!manifestFile) {
-            const files = [];
-            zip.forEach(p => files.push(p));
-            status.textContent = 'manifest.json nao encontrado. Arquivos: ' + files.join(', ');
-            status.style.color = '#ef4444';
-            return;
-          }
-          const manifestText = await manifestFile.async('string');
-          const manifest = JSON.parse(manifestText);
-
-          // ler template.html
-          const templateFile = findFile('template.html');
-          if (!templateFile) { status.textContent = 'template.html nao encontrado no zip'; status.style.color = '#ef4444'; return; }
-          const template = await templateFile.async('string');
-
-          // ler style.css (opcional)
-          let css = '';
-          const cssFile = findFile('style.css');
-          if (cssFile) css = await cssFile.async('string');
-
-          const appId = manifest.id || file.name.replace('.zip', '');
-          const name = manifest.name || appId;
-          const desc = manifest.description || '';
-          const icon = manifest.icon || '📦';
-          const author = manifest.author || '';
-          const version = manifest.version || '1.0';
-
-          status.textContent = 'Instalando ' + name + '...';
-
-          send({
-            type: 'appstore_install_zip',
-            appId, name, desc, icon, author, version,
-            template, css
+        devList.querySelectorAll('.bt-device').forEach(el => {
+          el.addEventListener('click', () => {
+            send({ type: 'bt_connect', index: parseInt(el.dataset.idx) });
+            statusEl.textContent = 'Conectando...';
           });
-
-          status.textContent = name + ' instalado com sucesso!';
-          status.style.color = '#22c55e';
-        } catch (err) {
-          status.textContent = 'Erro ao extrair zip: ' + err.message;
-          status.style.color = '#ef4444';
-        }
+        });
+      }
+      scanBtn.style.display = '';
+      stopBtn.style.display = 'none';
+      statusEl.textContent = `${devs.length} dispositivo(s)`;
+    } else if (msg.type === 'bt_connected') {
+      if (msg.ok) {
+        statusEl.textContent = msg.name;
+        detail.style.display = '';
+        $('#bt-detail-name').textContent = msg.name;
+        $('#bt-detail-addr').textContent = msg.address;
+        send({ type: 'bt_services' });
+      } else {
+        statusEl.textContent = 'Falha ao conectar';
+      }
+    } else if (msg.type === 'bt_services') {
+      const svcs = msg.services || [];
+      const chars = msg.characteristics || [];
+      $('#bt-services').innerHTML = svcs.map(s => `
+        <div class="bt-service">
+          <div class="bt-svc-name">${esc(s.name)}</div>
+          <div class="bt-svc-uuid">${esc(s.uuid)}</div>
+          ${s.chars.map(c => `<div class="bt-char-uuid">${esc(c)}</div>`).join('')}
+        </div>
+      `).join('');
+      charSelect.innerHTML = '<option value="">Selecione characteristic...</option>';
+      chars.forEach(c => {
+        const props = [c.read ? 'R' : '', c.write ? 'W' : '', c.notify ? 'N' : ''].filter(Boolean).join('');
+        const opt = document.createElement('option');
+        opt.value = c.uuid;
+        opt.textContent = c.uuid.substring(0, 8) + '... [' + props + ']';
+        charSelect.appendChild(opt);
       });
+      charSelect.addEventListener('change', () => { selectedChar = charSelect.value; });
+    } else if (msg.type === 'bt_read_result') {
+      log('READ [' + msg.charUuid.substring(0, 8) + '] = ' + (msg.value || '(vazio)'));
+    } else if (msg.type === 'bt_write_result') {
+      log('WRITE [' + msg.charUuid.substring(0, 8) + '] ' + (msg.ok ? 'OK' : 'FALHA'));
+    } else if (msg.type === 'bt_notify_result') {
+      log('NOTIFY [' + msg.charUuid.substring(0, 8) + '] ' + (msg.ok ? 'OK' : 'FALHA'));
     }
-
-    showZip();
-
-    tabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        if (tab.dataset.tab === 'zip') showZip();
-        else if (tab.dataset.tab === 'installed') showInstalled();
-      });
-    });
-    return;
-  }
-
-  // ---------- App customizado (template vindo do repo) ----------
-  const customApp = (state.installed || []).find(a => a.id === app);
-  if (customApp && customApp.template) {
-    body.className = 'win-body app-custom';
-    body.innerHTML = customApp.template;
-    // injetar CSS se houver
-    if (customApp.css) {
-      const style = document.createElement('style');
-      style.textContent = customApp.css;
-      body.appendChild(style);
-    }
-    return;
-  }
-
-  // app desconhecido
-  body.className = 'win-body';
-  body.innerHTML = `<p>App não disponível: <b>${esc(app)}</b></p>`;
+  };
 }
 
-// ============================================================================
-// Arrastar / redimensionar (inputs -> ESP32)
-// ============================================================================
+// =================== Init ===================
 
-function startDrag(e, w) {
-  const startX = e.clientX, startY = e.clientY;
-  const origX = w.x, origY = w.y;
+document.addEventListener('DOMContentLoaded', () => {
+  connectWS();
 
-  const move = (ev) => {
-    const dx = ev.clientX - startX;
-    const dy = ev.clientY - startY;
-    send({ type: 'move', id: w.id, x: origX + dx, y: origY + dy });
-  };
-  const up = () => {
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', up);
-  };
-  window.addEventListener('pointermove', move);
-  window.addEventListener('pointerup', up);
-}
-
-// ============================================================================
-// Taskbar
-// ============================================================================
-
-function renderTaskbar(order) {
-  DOM.taskbarTasks.innerHTML = '';
-  order.forEach(w => {
-    const btn = document.createElement('button');
-    btn.className = 'task-btn' + (w.min ? '' : '');
-    btn.textContent = w.title;
-    btn.addEventListener('click', () => {
-      if (w.min) send({ type: 'restore', id: w.id });
-      else send({ type: 'min', id: w.id });
+  // tab navigation
+  $$('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const page = tab.dataset.page;
+      if (page === 'appstore') { renderAppStore(); }
+      navigate(page);
     });
-    DOM.taskbarTasks.appendChild(btn);
   });
-}
 
-// ============================================================================
-// Escaping HTML
-// ============================================================================
+  // appstore tabs
+  $$('.as-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      asTab = tab.dataset.tab;
+      $$('.as-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === asTab));
+      renderAppStore();
+    });
+  });
 
-function esc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+  // settings
+  $('#cfg-check-update')?.addEventListener('click', () => {
+    $('#update-status').textContent = 'Verificando...';
+    send({ type: 'check_update' });
+  });
+  $('#cfg-reboot')?.addEventListener('click', () => {
+    if (confirm('Reiniciar ESP32?')) {
+      fetch('/api/reboot', { method: 'POST' });
+    }
+  });
+  $('#cfg-wifi-reset')?.addEventListener('click', () => {
+    if (confirm('Reconfigurar WiFi? O ESP32 vai reiniciar em modo AP.')) {
+      fetch('/api/reboot', { method: 'POST' });
+    }
+  });
 
-// ============================================================================
-// Icons + Start
-// ============================================================================
+  initBluetooth();
 
-$$('.icon', DOM.desktopIcons).forEach(icon => {
-  icon.addEventListener('dblclick', () => send({ type: 'open', app: icon.dataset.app }));
+  // clock update
+  setInterval(updateClock, 10000);
+  updateClock();
+
+  // initial render
+  renderDashboard();
 });
-
-DOM.startButton.addEventListener('click', () => {
-  send({ type: 'open', app: 'about' });
-});
-
-// ============================================================================
-// Init
-// ============================================================================
-
-DOM.loadingScreen.classList.add('hidden');
-DOM.loginScreen.classList.remove('hidden');
-connectWS();

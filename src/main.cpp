@@ -334,53 +334,12 @@ static void fillState(JsonDocument &s) {
   s["uptime"] = (unsigned long)(millis() / 1000);
   s["ip"] = WiFi.localIP().toString();
   s["ssid"] = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : "";
+  s["apMode"] = (WiFi.getMode() == WIFI_AP);
   s["chip"]["cores"] = ESP.getChipCores();
   s["chip"]["frequency"] = ESP.getCpuFreqMHz();
   s["chip"]["flash_size"] = (unsigned long)ESP.getFlashChipSize();
   s["chip"]["model"] = ESP.getChipModel();
 
-  JsonArray wins = s["windows"].to<JsonArray>();
-  for (int i = 0; i < desktop.windowCount; i++) {
-    Window *w = desktop.windows[i];
-    if (!w) continue;
-    JsonObject o = wins.add<JsonObject>();
-    o["id"] = (unsigned long)w->id;
-    o["app"] = w->app;
-    o["title"] = w->title;
-    o["x"] = w->x;
-    o["y"] = w->y;
-    o["w"] = w->w;
-    o["h"] = w->h;
-    o["z"] = (unsigned long)w->z;
-    o["min"] = w->minimized;
-    o["max"] = w->maximized;
-    o["ram"] = desktop.estimateWindowRAM(w);
-    if (w->app == "files") {
-      JsonArray files = o["files"].to<JsonArray>();
-      File root = LittleFS.open("/");
-      if (root && root.isDirectory()) {
-        File f = root.openNextFile();
-        while (f) {
-          if (!f.isDirectory()) {
-            JsonObject fo = files.add<JsonObject>();
-            fo["name"] = String("/") + f.name();
-            fo["size"] = (unsigned long)f.size();
-          }
-          f = root.openNextFile();
-        }
-      }
-    }
-    o["data"] = w->data.as<JsonVariant>();
-  }
-
-  // repos e apps instalados
-  JsonArray reposArr = s["repos"].to<JsonArray>();
-  for (int i = 0; i < desktop.repoCount; i++) {
-    JsonObject ro = reposArr.add<JsonObject>();
-    ro["index"] = i;
-    ro["url"] = desktop.repos[i].url;
-    ro["nickname"] = desktop.repos[i].nickname;
-  }
   JsonArray appsArr = s["installed"].to<JsonArray>();
   for (int i = 0; i < desktop.appCount; i++) {
     JsonObject ao = appsArr.add<JsonObject>();
@@ -407,62 +366,10 @@ static void broadcastState() {
 // ---------- Processamento de eventos vindos do browser ----------
 static void processWsEvent(const JsonDocument &doc) {
   String type = doc["type"] | "";
-  uint32_t id = (uint32_t)doc["id"];
 
-  if (type == "open") {
-    String app = doc["app"] | "";
-    desktop.openApp(app);
-  } else if (type == "close") {
-    desktop.closeWindow(id);
-  } else if (type == "min") {
-    desktop.minimizeWindow(id);
-  } else if (type == "max") {
-    desktop.maximizeWindow(id);
-  } else if (type == "restore") {
-    desktop.restoreWindow(id);
-  } else if (type == "focus") {
-    desktop.focusWindow(id);
-  } else if (type == "move") {
-    desktop.moveWindow(id, (int)doc["x"], (int)doc["y"]);
-  } else if (type == "resize") {
-    desktop.resizeWindow(id, (int)doc["w"], (int)doc["h"]);
-  } else if (type == "app") {
-    Window *w = desktop.getWindow(id);
-    if (w) {
-      JsonDocument ctx;
-      ctx["name"] = sys_name;
-      ctx["hostname"] = hostname;
-      ctx["ip"] = WiFi.localIP().toString();
-      ctx["heap"] = (long)ESP.getFreeHeap();
-      ctx["uptime"] = (unsigned long)(millis() / 1000);
-      JsonVariantConst action = doc["action"];
-      handleAppAction(w, action, ctx);
-      if (ctx["doReboot"] | false) {
-        broadcastState();
-        delay(300);
-        ESP.restart();
-      }
-      if (ctx["doResetWifi"] | false) {
-        wifi_ssid[0] = 0;
-        wifi_pass[0] = 0;
-        prefs.putString("wifi_ssid", "");
-        prefs.putString("wifi_pass", "");
-        broadcastState();
-        delay(300);
-        ESP.restart();
-      }
-    }
-  } else if (type == "appstore_list") {
-    // retorna repos + apps instalados
+  if (type == "appstore_list") {
     JsonDocument r;
     r["type"] = "appstore_data";
-    JsonArray reposArr = r["repos"].to<JsonArray>();
-    for (int i = 0; i < desktop.repoCount; i++) {
-      JsonObject ro = reposArr.add<JsonObject>();
-      ro["index"] = i;
-      ro["url"] = desktop.repos[i].url;
-      ro["nickname"] = desktop.repos[i].nickname;
-    }
     JsonArray appsArr = r["installed"].to<JsonArray>();
     for (int i = 0; i < desktop.appCount; i++) {
       JsonObject ao = appsArr.add<JsonObject>();
@@ -472,9 +379,11 @@ static void processWsEvent(const JsonDocument &doc) {
       ao["icon"] = desktop.installedApps[i].icon;
       ao["author"] = desktop.installedApps[i].author;
       ao["version"] = desktop.installedApps[i].version;
+      ao["template"] = desktop.installedApps[i].templateHtml;
+      ao["css"] = desktop.installedApps[i].css;
     }
     { String out; serializeJson(r, out); ws.textAll(out); }
-    return; // nao precisa de broadcastState
+    return;
 
   } else if (type == "appstore_uninstall") {
     String appId = doc["appId"] | "";
@@ -784,6 +693,35 @@ static void apiClearSession(AsyncWebServerRequest *request) {
   request->send(200, "application/json", "{\"ok\":true}");
 }
 
+// ---------- WiFi Config: configurar WiFi via POST ----------
+static void apiWifiConfig(AsyncWebServerRequest *request, JsonVariant &json) {
+  JsonObject doc = json.as<JsonObject>();
+  String ssid = doc["ssid"] | "";
+  String pass = doc["pass"] | "";
+  if (ssid.length() == 0) {
+    request->send(400, "application/json", "{\"ok\":false,\"msg\":\"SSID obrigatorio\"}");
+    return;
+  }
+  strlcpy(wifi_ssid, ssid.c_str(), sizeof(wifi_ssid));
+  strlcpy(wifi_pass, pass.c_str(), sizeof(wifi_pass));
+  prefs.putString("wifi_ssid", wifi_ssid);
+  prefs.putString("wifi_pass", wifi_pass);
+  request->send(200, "application/json", "{\"ok\":true,\"msg\":\"WiFi configurado. Reiniciando...\"}");
+  delay(500);
+  ESP.restart();
+}
+
+// ---------- WiFi Reset: apaga configuracao e reinicia em AP ----------
+static void apiWifiReset(AsyncWebServerRequest *request) {
+  wifi_ssid[0] = 0;
+  wifi_pass[0] = 0;
+  prefs.putString("wifi_ssid", "");
+  prefs.putString("wifi_pass", "");
+  request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Resetando WiFi...\"}");
+  delay(500);
+  ESP.restart();
+}
+
 // ---------- Proxy HTTP: ESP32 busca URL externa e repassa ----------
 static void apiProxy(AsyncWebServerRequest *request) {
   if (!checkAuth()) {
@@ -1006,9 +944,19 @@ void setup() {
   server.on("/api/proxy", HTTP_POST, apiProxy);
   server.on("/api/check-update", HTTP_GET, apiCheckUpdate);
   server.on("/api/install-update", HTTP_POST, apiInstallUpdate);
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/wifi-config",
+    [](AsyncWebServerRequest *request, JsonVariant &json) {
+      apiWifiConfig(request, json);
+    }));
+  server.on("/api/wifi-reset", HTTP_POST, apiWifiReset);
 
+  // Captive portal: se em AP mode, redireciona tudo para /
   server.onNotFound([](AsyncWebServerRequest *request) {
-    request->send(404, "text/plain", "Not found");
+    if (WiFi.getMode() == WIFI_AP) {
+      request->redirect("/");
+    } else {
+      request->send(404, "text/plain", "Not found");
+    }
   });
 
   server.begin();
