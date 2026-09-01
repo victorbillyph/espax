@@ -30,6 +30,7 @@ String Desktop::titleForApp(const String &app) {
   if (app == "browser") return "Browser";
   if (app == "taskmanager") return "Gerenciador de Tarefas";
   if (app == "appstore") return "App Store";
+  if (app == "bluetooth") return "Bluetooth";
   InstalledApp *a = getApp(app);
   if (a) return a->name;
   return app;
@@ -71,6 +72,8 @@ Window* Desktop::openApp(const String &app) {
     w->data["text"] = content;
   } else if (app == "appstore") {
     w->w = 520; w->h = 400;
+  } else if (app == "bluetooth") {
+    w->w = 650; w->h = 420;
   }
 
   zTop++;

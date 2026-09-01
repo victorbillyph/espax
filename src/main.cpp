@@ -11,6 +11,7 @@
 #include "FS.h"
 #include "Desktop.h"
 #include "Apps.h"
+#include "BleManager.h"
 
 #define DEFAULT_PASSWORD "admin"
 #define DEFAULT_HOSTNAME "espax"
@@ -28,6 +29,7 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
 Desktop desktop;
+BluetoothManager btMgr;
 
 static char hostname[64] = DEFAULT_HOSTNAME;
 static char wifi_ssid[64] = DEFAULT_WIFI_SSID;
@@ -474,120 +476,6 @@ static void processWsEvent(const JsonDocument &doc) {
     { String out; serializeJson(r, out); ws.textAll(out); }
     return; // nao precisa de broadcastState
 
-  } else if (type == "appstore_addrepo") {
-    String url = doc["url"] | "";
-    String nick = doc["nickname"] | "";
-    desktop.addRepo(url, nick);
-
-  } else if (type == "appstore_removerepo") {
-    int idx = (int)doc["index"];
-    desktop.removeRepo(idx);
-
-  } else if (type == "appstore_browse") {
-    String url = doc["url"] | "";
-    JsonDocument r;
-    r["type"] = "appstore_browse";
-    r["url"] = url;
-    r["ok"] = false;
-
-    if (WiFi.status() == WL_CONNECTED && url.length() > 0) {
-      // converter GitHub URL para raw
-      String fetchUrl = url;
-      if (fetchUrl.endsWith("/")) fetchUrl = fetchUrl.substring(0, fetchUrl.length() - 1);
-      if (fetchUrl.startsWith("https://github.com/") || fetchUrl.startsWith("http://github.com/")) {
-        String ghPath = fetchUrl;
-        if (ghPath.startsWith("http")) ghPath = ghPath.substring(ghPath.indexOf("//") + 2);
-        if (ghPath.endsWith("/")) ghPath = ghPath.substring(0, ghPath.length() - 1);
-        fetchUrl = "https://raw.githubusercontent.com/" + ghPath.substring(ghPath.indexOf("/") + 1) + "/main/repo.json";
-      } else {
-        // HTTP direto: buscar repo.json
-        if (!fetchUrl.endsWith("/")) fetchUrl += "/";
-        fetchUrl += "repo.json";
-      }
-
-      HTTPClient http;
-      http.begin(fetchUrl);
-      http.setTimeout(8000);
-      int code = http.GET();
-      if (code == 200) {
-        String payload = http.getString();
-        JsonDocument repoDoc;
-        if (!deserializeJson(repoDoc, payload)) {
-          JsonArray appsList = r["apps"].to<JsonArray>();
-          JsonArray apps = repoDoc["apps"];
-          for (JsonObject app : apps) {
-            JsonObject ao = appsList.add<JsonObject>();
-            ao["id"] = app["id"] | "";
-            ao["name"] = app["name"] | "";
-            ao["desc"] = app["description"] | app["desc"] | "";
-            ao["icon"] = app["icon"] | "📦";
-            ao["author"] = app["author"] | "";
-            ao["version"] = app["version"] | "1.0";
-            ao["dir"] = app["dir"] | app["id"] | "";
-          }
-          r["ok"] = true;
-        }
-      }
-      http.end();
-    }
-    { String out; serializeJson(r, out); ws.textAll(out); }
-    return;
-
-  } else if (type == "appstore_install") {
-    String repoUrl = doc["repo"] | "";
-    String appId = doc["appId"] | "";
-    String dir = doc["dir"] | appId;
-
-    // buscar manifest + template do repo
-    String baseUrl = repoUrl;
-    if (baseUrl.endsWith("/")) baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
-
-    // suporta GitHub
-    if (repoUrl.startsWith("https://github.com/") || repoUrl.startsWith("http://github.com/")) {
-      String ghPath = repoUrl;
-      if (ghPath.startsWith("http")) ghPath = ghPath.substring(ghPath.indexOf("//") + 2);
-      if (ghPath.endsWith("/")) ghPath = ghPath.substring(0, ghPath.length() - 1);
-      String userRepo = ghPath.substring(ghPath.indexOf("/") + 1);
-      baseUrl = "https://raw.githubusercontent.com/" + userRepo + "/main/apps/" + dir;
-    } else {
-      baseUrl = baseUrl + "/" + dir;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      // buscar manifest.json
-      HTTPClient http;
-      http.begin(baseUrl + "/manifest.json");
-      int code = http.GET();
-      if (code == 200) {
-        String m = http.getString();
-        JsonDocument manifest;
-        if (!deserializeJson(manifest, m)) {
-          String name = manifest["name"] | appId;
-          String desc = manifest["description"] | "";
-          String icon = manifest["icon"] | "📦";
-          String author = manifest["author"] | "";
-          String version = manifest["version"] | "1.0";
-
-          // buscar template.html
-          http.end();
-          http.begin(baseUrl + "/template.html");
-          String tmpl = "";
-          if (http.GET() == 200) tmpl = http.getString();
-          http.end();
-
-          // buscar style.css (opcional)
-          String css = "";
-          http.begin(baseUrl + "/style.css");
-          if (http.GET() == 200) css = http.getString();
-          http.end();
-
-          desktop.installApp(appId, name, desc, icon, author, version, tmpl, css);
-        }
-      }
-      http.end();
-    }
-    broadcastState();
-
   } else if (type == "appstore_uninstall") {
     String appId = doc["appId"] | "";
     desktop.uninstallApp(appId);
@@ -606,6 +494,95 @@ static void processWsEvent(const JsonDocument &doc) {
       desktop.installApp(appId, name, desc, icon, author, version, tmpl, css);
       broadcastState();
     }
+
+  } else if (type == "bt_scan") {
+    int duration = doc["duration"] | 10;
+    btMgr.startScan(duration);
+
+  } else if (type == "bt_stop") {
+    btMgr.stopScan();
+
+  } else if (type == "bt_connect") {
+    int idx = doc["index"] | 0;
+    bool ok = btMgr.connectToDevice(idx);
+    JsonDocument r;
+    r["type"] = "bt_connected";
+    r["ok"] = ok;
+    if (ok) {
+      r["name"] = btMgr.getDevices()[idx].name;
+      r["address"] = btMgr.getDevices()[idx].address;
+    }
+    { String out; serializeJson(r, out); ws.textAll(out); }
+
+  } else if (type == "bt_disconnect") {
+    btMgr.disconnect();
+
+  } else if (type == "bt_devices") {
+    JsonDocument r;
+    r["type"] = "bt_devices";
+    JsonArray arr = r["devices"].to<JsonArray>();
+    for (auto& dev : btMgr.getDevices()) {
+      JsonObject o = arr.add<JsonObject>();
+      o["address"] = dev.address;
+      o["name"] = dev.name;
+      o["rssi"] = dev.rssi;
+      o["connected"] = dev.connected;
+    }
+    r["scanning"] = false;
+    { String out; serializeJson(r, out); ws.textAll(out); }
+
+  } else if (type == "bt_services") {
+    JsonDocument r;
+    r["type"] = "bt_services";
+    JsonArray sarr = r["services"].to<JsonArray>();
+    for (auto& svc : btMgr.getServices()) {
+      JsonObject o = sarr.add<JsonObject>();
+      o["uuid"] = svc.uuid;
+      o["name"] = svc.name;
+      JsonArray carr = o["chars"].to<JsonArray>();
+      for (auto& c : svc.chars) carr.add(c);
+    }
+    JsonArray carr = r["characteristics"].to<JsonArray>();
+    for (auto& ch : btMgr.getCharacteristics()) {
+      JsonObject o = carr.add<JsonObject>();
+      o["uuid"] = ch.uuid;
+      o["serviceUuid"] = ch.serviceUuid;
+      o["read"] = ch.canRead;
+      o["write"] = ch.canWrite;
+      o["notify"] = ch.canNotify;
+      o["indicate"] = false;
+    }
+    { String out; serializeJson(r, out); ws.textAll(out); }
+
+  } else if (type == "bt_read") {
+    String charUuid = doc["charUuid"] | "";
+    String val = btMgr.readCharacteristic(charUuid);
+    JsonDocument r;
+    r["type"] = "bt_read_result";
+    r["charUuid"] = charUuid;
+    r["value"] = val;
+    r["ok"] = val.length() > 0;
+    { String out; serializeJson(r, out); ws.textAll(out); }
+
+  } else if (type == "bt_write") {
+    String charUuid = doc["charUuid"] | "";
+    String data = doc["data"] | "";
+    bool ok = btMgr.writeCharacteristic(charUuid, data);
+    JsonDocument r;
+    r["type"] = "bt_write_result";
+    r["charUuid"] = charUuid;
+    r["ok"] = ok;
+    { String out; serializeJson(r, out); ws.textAll(out); }
+
+  } else if (type == "bt_notify") {
+    String charUuid = doc["charUuid"] | "";
+    bool enable = doc["enable"] | true;
+    bool ok = enable ? btMgr.subscribeNotify(charUuid) : btMgr.unsubscribeNotify(charUuid);
+    JsonDocument r;
+    r["type"] = "bt_notify_result";
+    r["charUuid"] = charUuid;
+    r["ok"] = ok;
+    { String out; serializeJson(r, out); ws.textAll(out); }
 
   } else if (type == "check_update") {
     if (WiFi.status() == WL_CONNECTED) {
@@ -1045,5 +1022,6 @@ unsigned long lastSerialPrint = 0;
 void loop() {
   ws.cleanupClients();
   handleSerial();
+  btMgr.loop();
   delay(1);
 }

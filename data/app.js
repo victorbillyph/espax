@@ -30,6 +30,7 @@ let authed = false;
 let ws = null;
 let wsReconnect = null;
 let appState = { repos: [], installed: [] };
+let btMsgHandler = null;
 
 // ============================================================================
 // Comunicacao ESP32 (WebSocket)
@@ -62,39 +63,7 @@ function connectWS() {
     } else if (msg.type === 'state') {
       renderState(msg);
     } else if (msg.type === 'appstore_data') {
-      // atualizar state local com repos e installed
-      appState.repos = msg.repos || [];
       appState.installed = msg.installed || [];
-    } else if (msg.type === 'appstore_browse') {
-      // mostrar resultados da busca
-      const results = document.querySelector('#as-results');
-      if (results && msg.ok) {
-        const apps = msg.apps || [];
-        if (apps.length === 0) {
-          results.innerHTML = '<div class="as-empty">Nenhum app encontrado</div>';
-          return;
-        }
-        results.innerHTML = apps.map(a => `
-          <div class="as-app-card">
-            <div class="as-app-icon">${esc(a.icon)}</div>
-            <div class="as-app-info">
-              <div class="as-app-name">${esc(a.name)}</div>
-              <div class="as-app-desc">${esc(a.desc)}</div>
-              <div class="as-app-meta">${esc(a.author || 'Desconhecido')} · v${esc(a.version || '1.0')}</div>
-            </div>
-            <div class="as-app-actions">
-              <button class="as-btn as-btn-install" data-repo="${esc(msg.url)}" data-app="${esc(a.id)}" data-dir="${esc(a.dir || a.id)}">Instalar</button>
-            </div>
-          </div>
-        `).join('');
-        results.querySelectorAll('.as-btn-install').forEach(btn => {
-          btn.addEventListener('click', () => {
-            send({ type: 'appstore_install', repo: btn.dataset.repo, appId: btn.dataset.app, dir: btn.dataset.dir });
-          });
-        });
-      } else if (results) {
-        results.innerHTML = '<div class="as-empty">Erro ao buscar repositorio</div>';
-      }
     } else if (msg.type === 'update_info') {
       const status = document.querySelector('#update-status');
       if (status) {
@@ -121,6 +90,8 @@ function connectWS() {
         status.style.color = '#f59e0b';
       }
     }
+
+    if (btMsgHandler) btMsgHandler(msg);
   };
 }
 
@@ -479,100 +450,201 @@ function renderAppBody(body, w, state) {
     return;
   }
 
+  if (app === 'bluetooth') {
+    body.className = 'win-body app-bluetooth';
+    body.innerHTML = `
+      <div class="bt-header">
+        <button class="as-btn" id="bt-scan-btn">Iniciar Scan</button>
+        <button class="as-btn" id="bt-stop-btn" style="display:none">Parar</button>
+        <button class="as-btn" id="bt-disconnect-btn" style="display:none">Desconectar</button>
+        <span id="bt-status" style="color:#94a3b8;font-size:12px;margin-left:8px">Pronto</span>
+      </div>
+      <div class="bt-content">
+        <div class="bt-panel" id="bt-devices-panel">
+          <div class="bt-panel-title">Dispositivos</div>
+          <div class="bt-list" id="bt-devices-list">
+            <div class="bt-empty">Nenhum dispositivo encontrado</div>
+          </div>
+        </div>
+        <div class="bt-panel" id="bt-detail-panel" style="display:none">
+          <div class="bt-panel-title" id="bt-detail-name">-</div>
+          <div class="bt-services" id="bt-services-list"></div>
+          <div class="bt-panel-title" style="margin-top:8px">GATT</div>
+          <div class="bt-gatt">
+            <div class="bt-gatt-row">
+              <select id="bt-char-select" class="bt-input" style="flex:1">
+                <option value="">Selecione uma characteristic...</option>
+              </select>
+              <button class="as-btn as-btn-sm" id="bt-read-btn">Read</button>
+            </div>
+            <div class="bt-gatt-row">
+              <input class="bt-input" id="bt-write-data" placeholder="Dados para escrever (hex ou texto)" style="flex:1">
+              <button class="as-btn as-btn-sm" id="bt-write-btn">Write</button>
+            </div>
+            <div class="bt-gatt-row">
+              <button class="as-btn as-btn-sm" id="bt-notify-btn">Notify ON</button>
+              <button class="as-btn as-btn-sm" id="bt-notify-off-btn">Notify OFF</button>
+            </div>
+            <div class="bt-gatt-log" id="bt-gatt-log"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const scanBtn = body.querySelector('#bt-scan-btn');
+    const stopBtn = body.querySelector('#bt-stop-btn');
+    const discBtn = body.querySelector('#bt-disconnect-btn');
+    const statusEl = body.querySelector('#bt-status');
+    const devList = body.querySelector('#bt-devices-list');
+    const detailPanel = body.querySelector('#bt-detail-panel');
+    const detailName = body.querySelector('#bt-detail-name');
+    const servicesList = body.querySelector('#bt-services-list');
+    const charSelect = body.querySelector('#bt-char-select');
+    const gattLog = body.querySelector('#bt-gatt-log');
+
+    let selectedCharUuid = '';
+
+    function logGatt(msg) {
+      const line = document.createElement('div');
+      line.textContent = msg;
+      gattLog.appendChild(line);
+      gattLog.scrollTop = gattLog.scrollHeight;
+    }
+
+    scanBtn.addEventListener('click', () => {
+      send({ type: 'bt_scan', duration: 10 });
+      statusEl.textContent = 'Escaneando...';
+      scanBtn.style.display = 'none';
+      stopBtn.style.display = '';
+    });
+
+    stopBtn.addEventListener('click', () => {
+      send({ type: 'bt_stop' });
+      statusEl.textContent = 'Parado';
+      scanBtn.style.display = '';
+      stopBtn.style.display = 'none';
+    });
+
+    discBtn.addEventListener('click', () => {
+      send({ type: 'bt_disconnect' });
+      detailPanel.style.display = 'none';
+      discBtn.style.display = 'none';
+      statusEl.textContent = 'Desconectado';
+      charSelect.innerHTML = '<option value="">Selecione uma characteristic...</option>';
+    });
+
+    body.querySelector('#bt-read-btn').addEventListener('click', () => {
+      if (selectedCharUuid) {
+        send({ type: 'bt_read', charUuid: selectedCharUuid });
+        logGatt('READ ' + selectedCharUuid.substring(0, 8) + '...');
+      }
+    });
+
+    body.querySelector('#bt-write-btn').addEventListener('click', () => {
+      const data = body.querySelector('#bt-write-data').value;
+      if (selectedCharUuid && data) {
+        send({ type: 'bt_write', charUuid: selectedCharUuid, data });
+        logGatt('WRITE ' + selectedCharUuid.substring(0, 8) + '...: ' + data);
+      }
+    });
+
+    body.querySelector('#bt-notify-btn').addEventListener('click', () => {
+      if (selectedCharUuid) {
+        send({ type: 'bt_notify', charUuid: selectedCharUuid, enable: true });
+        logGatt('NOTIFY ON ' + selectedCharUuid.substring(0, 8) + '...');
+      }
+    });
+
+    body.querySelector('#bt-notify-off-btn').addEventListener('click', () => {
+      if (selectedCharUuid) {
+        send({ type: 'bt_notify', charUuid: selectedCharUuid, enable: false });
+        logGatt('NOTIFY OFF');
+      }
+    });
+
+    // handler para mensagens BLE
+    const btHandler = (msg) => {
+      if (msg.type === 'bt_devices') {
+        const devs = msg.devices || [];
+        if (devs.length === 0) {
+          devList.innerHTML = '<div class="bt-empty">Nenhum dispositivo encontrado</div>';
+        } else {
+          devList.innerHTML = devs.map((d, i) => `
+            <div class="bt-device ${d.connected ? 'bt-connected' : ''}" data-idx="${i}">
+              <div class="bt-dev-name">${esc(d.name)}</div>
+              <div class="bt-dev-addr">${esc(d.address)} · ${d.rssi} dBm</div>
+            </div>
+          `).join('');
+          devList.querySelectorAll('.bt-device').forEach(el => {
+            el.addEventListener('click', () => {
+              send({ type: 'bt_connect', index: parseInt(el.dataset.idx) });
+              statusEl.textContent = 'Conectando...';
+            });
+          });
+        }
+        scanBtn.style.display = '';
+        stopBtn.style.display = 'none';
+        statusEl.textContent = devs.length + ' dispositivo(s) encontrado(s)';
+      } else if (msg.type === 'bt_connected') {
+        if (msg.ok) {
+          statusEl.textContent = 'Conectado: ' + msg.name;
+          discBtn.style.display = '';
+          detailPanel.style.display = '';
+          detailName.textContent = msg.name + ' (' + msg.address + ')';
+          // pedir servicos
+          send({ type: 'bt_services' });
+        } else {
+          statusEl.textContent = 'Falha ao conectar';
+        }
+      } else if (msg.type === 'bt_services') {
+        const svcs = msg.services || [];
+        const chars = msg.characteristics || [];
+        servicesList.innerHTML = svcs.map(s => `
+          <div class="bt-service">
+            <div class="bt-svc-name">${esc(s.name)}</div>
+            <div class="bt-svc-uuid">${esc(s.uuid)}</div>
+            ${s.chars.map(c => `<div class="bt-char-uuid">${esc(c)}</div>`).join('')}
+          </div>
+        `).join('');
+
+        charSelect.innerHTML = '<option value="">Selecione uma characteristic...</option>';
+        chars.forEach(c => {
+          const props = [c.read ? 'R' : '', c.write ? 'W' : '', c.notify ? 'N' : ''].filter(Boolean).join('');
+          const opt = document.createElement('option');
+          opt.value = c.uuid;
+          opt.textContent = c.uuid.substring(0, 8) + '... [' + props + ']';
+          charSelect.appendChild(opt);
+        });
+        charSelect.addEventListener('change', () => {
+          selectedCharUuid = charSelect.value;
+        });
+      } else if (msg.type === 'bt_read_result') {
+        logGatt('READ [' + msg.charUuid.substring(0, 8) + '] = ' + (msg.value || '(vazio)'));
+      } else if (msg.type === 'bt_write_result') {
+        logGatt('WRITE [' + msg.charUuid.substring(0, 8) + '] ' + (msg.ok ? 'OK' : 'FALHA'));
+      } else if (msg.type === 'bt_notify_result') {
+        logGatt('NOTIFY [' + msg.charUuid.substring(0, 8) + '] ' + (msg.ok ? 'OK' : 'FALHA'));
+      }
+    };
+
+    // registrar handler temporario
+    btMsgHandler = btHandler;
+    return;
+  }
+
   if (app === 'appstore') {
     body.className = 'win-body app-appstore';
-    const repos = state.repos || [];
     const installed = state.installed || [];
 
     body.innerHTML = `
       <div class="as-tabs">
-        <button class="as-tab active" data-tab="browse">Explorar</button>
+        <button class="as-tab active" data-tab="zip">Instalar ZIP</button>
         <button class="as-tab" data-tab="installed">Instalados</button>
-        <button class="as-tab" data-tab="repos">Repositorios</button>
-        <button class="as-tab" data-tab="zip">ZIP</button>
       </div>
       <div class="as-content" id="as-content"></div>
     `;
     const content = body.querySelector('#as-content');
     const tabs = body.querySelectorAll('.as-tab');
-
-    function showBrowse() {
-      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'browse'));
-      content.innerHTML = `
-        <div class="as-section">
-          <div class="as-row">
-            <input class="as-input" id="as-browse-url" placeholder="URL do repositorio (ex: https://github.com/user/repo)">
-            <button class="as-btn" id="as-browse-btn">Buscar</button>
-          </div>
-          <div id="as-results" class="as-results"></div>
-        </div>
-      `;
-      content.querySelector('#as-browse-btn').addEventListener('click', () => {
-        const url = content.querySelector('#as-browse-url').value.trim();
-        if (url) send({ type: 'appstore_browse', url });
-      });
-    }
-
-    function showInstalled() {
-      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'installed'));
-      if (installed.length === 0) {
-        content.innerHTML = '<div class="as-empty">Nenhum app instalado</div>';
-        return;
-      }
-      content.innerHTML = installed.map(a => `
-        <div class="as-app-card">
-          <div class="as-app-icon">${esc(a.icon)}</div>
-          <div class="as-app-info">
-            <div class="as-app-name">${esc(a.name)}</div>
-            <div class="as-app-desc">${esc(a.desc)}</div>
-            <div class="as-app-meta">${esc(a.author || 'Desconhecido')} · v${esc(a.version || '1.0')}</div>
-          </div>
-          <div class="as-app-actions">
-            <button class="as-btn as-btn-open" data-app="${esc(a.id)}">Abrir</button>
-            <button class="as-btn as-btn-remove" data-app="${esc(a.id)}">Remover</button>
-          </div>
-        </div>
-      `).join('');
-      content.querySelectorAll('.as-btn-open').forEach(btn => {
-        btn.addEventListener('click', () => send({ type: 'open', app: btn.dataset.app }));
-      });
-      content.querySelectorAll('.as-btn-remove').forEach(btn => {
-        btn.addEventListener('click', () => send({ type: 'appstore_uninstall', appId: btn.dataset.app }));
-      });
-    }
-
-    function showRepos() {
-      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'repos'));
-      content.innerHTML = `
-        <div class="as-section">
-          <div class="as-row">
-            <input class="as-input" id="as-repo-url" placeholder="URL do repositorio">
-            <input class="as-input as-input-sm" id="as-repo-nick" placeholder="Apelido">
-            <button class="as-btn" id="as-add-repo">Adicionar</button>
-          </div>
-          <div class="as-repo-list">
-            ${repos.map((r, i) => `
-              <div class="as-repo">
-                <div class="as-repo-info">
-                  <span class="as-repo-name">${esc(r.nickname || r.url)}</span>
-                  <span class="as-repo-url">${esc(r.url)}</span>
-                </div>
-                <button class="as-btn as-btn-remove as-btn-sm" data-idx="${i}">Remover</button>
-              </div>
-            `).join('')}
-            ${repos.length === 0 ? '<div class="as-empty">Nenhum repositorio adicionado</div>' : ''}
-          </div>
-        </div>
-      `;
-      content.querySelector('#as-add-repo').addEventListener('click', () => {
-        const url = content.querySelector('#as-repo-url').value.trim();
-        const nick = content.querySelector('#as-repo-nick').value.trim();
-        if (url) send({ type: 'appstore_addrepo', url, nickname: nick });
-      });
-      content.querySelectorAll('.as-btn-remove[data-idx]').forEach(btn => {
-        btn.addEventListener('click', () => send({ type: 'appstore_removerepo', index: parseInt(btn.dataset.idx) }));
-      });
-    }
 
     function showZip() {
       tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'zip'));
@@ -661,14 +733,12 @@ function renderAppBody(body, w, state) {
       });
     }
 
-    showBrowse();
+    showZip();
 
     tabs.forEach(tab => {
       tab.addEventListener('click', () => {
-        if (tab.dataset.tab === 'browse') showBrowse();
+        if (tab.dataset.tab === 'zip') showZip();
         else if (tab.dataset.tab === 'installed') showInstalled();
-        else if (tab.dataset.tab === 'repos') showRepos();
-        else if (tab.dataset.tab === 'zip') showZip();
       });
     });
     return;
