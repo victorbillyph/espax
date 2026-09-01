@@ -489,6 +489,7 @@ function renderAppBody(body, w, state) {
         <button class="as-tab active" data-tab="browse">Explorar</button>
         <button class="as-tab" data-tab="installed">Instalados</button>
         <button class="as-tab" data-tab="repos">Repositorios</button>
+        <button class="as-tab" data-tab="zip">ZIP</button>
       </div>
       <div class="as-content" id="as-content"></div>
     `;
@@ -573,6 +574,77 @@ function renderAppBody(body, w, state) {
       });
     }
 
+    function showZip() {
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'zip'));
+      content.innerHTML = `
+        <div class="as-section">
+          <p style="color:#94a3b8;font-size:13px;margin-bottom:12px">
+            Selecione um arquivo .zip contendo: <b>manifest.json</b> + <b>template.html</b> (+ <b>style.css</b> opcional)
+          </p>
+          <div class="as-row">
+            <input type="file" id="as-zip-input" accept=".zip" style="
+              flex:1;padding:10px;background:rgba(255,255,255,0.06);
+              border:1px solid rgba(255,255,255,0.1);border-radius:8px;
+              color:#e2e8f0;font-size:13px;
+            ">
+            <button class="as-btn" id="as-zip-btn">Instalar</button>
+          </div>
+          <div id="as-zip-status" style="margin-top:10px;font-size:12px;color:#94a3b8"></div>
+        </div>
+      `;
+      content.querySelector('#as-zip-btn').addEventListener('click', async () => {
+        const input = content.querySelector('#as-zip-input');
+        const status = content.querySelector('#as-zip-status');
+        const file = input.files[0];
+        if (!file) { status.textContent = 'Selecione um arquivo .zip'; status.style.color = '#ef4444'; return; }
+        if (!file.name.endsWith('.zip')) { status.textContent = 'Arquivo deve ser .zip'; status.style.color = '#ef4444'; return; }
+
+        status.textContent = 'Extraindo...';
+        status.style.color = '#f59e0b';
+
+        try {
+          const zip = await JSZip.loadAsync(file);
+
+          // ler manifest.json
+          const manifestFile = zip.file('manifest.json');
+          if (!manifestFile) { status.textContent = 'manifest.json nao encontrado no zip'; status.style.color = '#ef4444'; return; }
+          const manifestText = await manifestFile.async('string');
+          const manifest = JSON.parse(manifestText);
+
+          // ler template.html
+          const templateFile = zip.file('template.html');
+          if (!templateFile) { status.textContent = 'template.html nao encontrado no zip'; status.style.color = '#ef4444'; return; }
+          const template = await templateFile.async('string');
+
+          // ler style.css (opcional)
+          let css = '';
+          const cssFile = zip.file('style.css');
+          if (cssFile) css = await cssFile.async('string');
+
+          const appId = manifest.id || file.name.replace('.zip', '');
+          const name = manifest.name || appId;
+          const desc = manifest.description || '';
+          const icon = manifest.icon || '📦';
+          const author = manifest.author || '';
+          const version = manifest.version || '1.0';
+
+          status.textContent = 'Instalando ' + name + '...';
+
+          send({
+            type: 'appstore_install_zip',
+            appId, name, desc, icon, author, version,
+            template, css
+          });
+
+          status.textContent = name + ' instalado com sucesso!';
+          status.style.color = '#22c55e';
+        } catch (err) {
+          status.textContent = 'Erro ao extrair zip: ' + err.message;
+          status.style.color = '#ef4444';
+        }
+      });
+    }
+
     showBrowse();
 
     tabs.forEach(tab => {
@@ -580,6 +652,7 @@ function renderAppBody(body, w, state) {
         if (tab.dataset.tab === 'browse') showBrowse();
         else if (tab.dataset.tab === 'installed') showInstalled();
         else if (tab.dataset.tab === 'repos') showRepos();
+        else if (tab.dataset.tab === 'zip') showZip();
       });
     });
     return;

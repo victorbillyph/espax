@@ -591,6 +591,19 @@ static void processWsEvent(const JsonDocument &doc) {
     String appId = doc["appId"] | "";
     desktop.uninstallApp(appId);
 
+  } else if (type == "appstore_install_zip") {
+    String appId = doc["appId"] | "";
+    String name = doc["name"] | appId;
+    String desc = doc["desc"] | "";
+    String icon = doc["icon"] | "📦";
+    String author = doc["author"] | "";
+    String version = doc["version"] | "1.0";
+    String tmpl = doc["template"] | "";
+    String css = doc["css"] | "";
+    if (appId.length() > 0 && tmpl.length() > 0) {
+      desktop.installApp(appId, name, desc, icon, author, version, tmpl, css);
+    }
+
   } else if (type == "check_update") {
     if (WiFi.status() == WL_CONNECTED) {
       String versionUrl = "https://raw.githubusercontent.com/" + String(ESPAX_GITHUB_REPO) + "/main/version.json";
