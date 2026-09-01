@@ -484,80 +484,46 @@ static void processWsEvent(const JsonDocument &doc) {
     desktop.removeRepo(idx);
 
   } else if (type == "appstore_browse") {
-    // busca a lista de apps de um repo via HTTP
     String url = doc["url"] | "";
-    // suporta GitHub: https://github.com/user/repo -> api
-    // e URLs diretas que retornam JSON
     JsonDocument r;
     r["type"] = "appstore_browse";
     r["url"] = url;
     r["ok"] = false;
 
     if (WiFi.status() == WL_CONNECTED && url.length() > 0) {
-      HTTPClient http;
+      // converter GitHub URL para raw
       String fetchUrl = url;
-
-      // converter GitHub URL para API
-      if (url.startsWith("https://github.com/") || url.startsWith("http://github.com/")) {
-        String path = url;
-        if (path.startsWith("http")) path = path.substring(path.indexOf("//") + 2);
-        if (path.endsWith("/")) path = path.substring(0, path.length() - 1);
-        // github.com/user/repo -> api.github.com/repos/user/repo/contents/apps
-        fetchUrl = "https://api.github.com/repos/" + path.substring(path.indexOf("/") + 1) + "/contents/apps";
+      if (fetchUrl.endsWith("/")) fetchUrl = fetchUrl.substring(0, fetchUrl.length() - 1);
+      if (fetchUrl.startsWith("https://github.com/") || fetchUrl.startsWith("http://github.com/")) {
+        String ghPath = fetchUrl;
+        if (ghPath.startsWith("http")) ghPath = ghPath.substring(ghPath.indexOf("//") + 2);
+        if (ghPath.endsWith("/")) ghPath = ghPath.substring(0, ghPath.length() - 1);
+        fetchUrl = "https://raw.githubusercontent.com/" + ghPath.substring(ghPath.indexOf("/") + 1) + "/main/repo.json";
+      } else {
+        // HTTP direto: buscar repo.json
+        if (!fetchUrl.endsWith("/")) fetchUrl += "/";
+        fetchUrl += "repo.json";
       }
 
+      HTTPClient http;
       http.begin(fetchUrl);
-      http.addHeader("Accept", "application/vnd.github.v3+json");
+      http.setTimeout(8000);
       int code = http.GET();
       if (code == 200) {
         String payload = http.getString();
         JsonDocument repoDoc;
-        DeserializationError err = deserializeJson(repoDoc, payload);
-        if (!err) {
+        if (!deserializeJson(repoDoc, payload)) {
           JsonArray appsList = r["apps"].to<JsonArray>();
-          if (fetchUrl.indexOf("api.github.com") >= 0) {
-            // GitHub API: lista de arquivos
-            for (JsonObject item : repoDoc.as<JsonArray>()) {
-              String name = item["name"] | "";
-              String type2 = item["type"] | "";
-              if (type2 == "dir" && name.length() > 0) {
-                // cada dir e um app, buscar o manifest
-                String appUrl = "https://raw.githubusercontent.com/" +
-                  fetchUrl.substring(fetchUrl.indexOf("repos/") + 6,
-                                     fetchUrl.indexOf("/contents/")) +
-                  "/main/apps/" + name + "/manifest.json";
-                HTTPClient http2;
-                http2.begin(appUrl);
-                int c2 = http2.GET();
-                if (c2 == 200) {
-                  String m = http2.getString();
-                  JsonDocument manifest;
-                  if (!deserializeJson(manifest, m)) {
-                    JsonObject ao = appsList.add<JsonObject>();
-                    ao["id"] = manifest["id"] | name;
-                    ao["name"] = manifest["name"] | name;
-                    ao["desc"] = manifest["description"] | "";
-                    ao["icon"] = manifest["icon"] | "📦";
-                    ao["author"] = manifest["author"] | "";
-                    ao["version"] = manifest["version"] | "1.0";
-                    ao["dir"] = name;
-                  }
-                }
-                http2.end();
-              }
-            }
-          } else {
-            // formato direto: JSON array de apps
-            for (JsonObject item : repoDoc.as<JsonArray>()) {
-              JsonObject ao = appsList.add<JsonObject>();
-              ao["id"] = item["id"] | "";
-              ao["name"] = item["name"] | "";
-              ao["desc"] = item["description"] | item["desc"] | "";
-              ao["icon"] = item["icon"] | "📦";
-              ao["author"] = item["author"] | "";
-              ao["version"] = item["version"] | "1.0";
-              ao["dir"] = item["dir"] | item["id"] | "";
-            }
+          JsonArray apps = repoDoc["apps"];
+          for (JsonObject app : apps) {
+            JsonObject ao = appsList.add<JsonObject>();
+            ao["id"] = app["id"] | "";
+            ao["name"] = app["name"] | "";
+            ao["desc"] = app["description"] | app["desc"] | "";
+            ao["icon"] = app["icon"] | "📦";
+            ao["author"] = app["author"] | "";
+            ao["version"] = app["version"] | "1.0";
+            ao["dir"] = app["dir"] | app["id"] | "";
           }
           r["ok"] = true;
         }
