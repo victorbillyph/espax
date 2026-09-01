@@ -1,0 +1,43 @@
+<div style="padding: 20px; text-align: center;">
+  <div style="font-size: 48px; margin-bottom: 12px;">👋</div>
+  <h2 style="margin: 0 0 8px; color: #0f172a;">Olá, ESPax!</h2>
+  <p style="color: #64748b; margin: 0 0 20px;">Este é um app de exemplo para demonstrar o sistema de apps.</p>
+
+  <div id="hw-counter" style="margin: 0 auto 20px; max-width: 300px;">
+    <div style="font-size: 36px; font-weight: 800; color: #6366f1; margin-bottom: 12px;" id="hw-count">0</div>
+    <button onclick="hwClick()" style="
+      padding: 12px 24px; border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #22d3ee, #6366f1);
+      color: #fff; font-weight: 600; font-size: 14px;
+      cursor: pointer;
+    ">Clique Aqui!</button>
+    <button onclick="hwReset()" style="
+      padding: 12px 24px; border: 1px solid #e2e8f0; border-radius: 8px;
+      background: transparent; color: #64748b; font-weight: 600;
+      font-size: 14px; cursor: pointer; margin-left: 8px;
+    ">Resetar</button>
+  </div>
+
+  <div style="
+    padding: 14px; border-radius: 8px;
+    background: #f8fafc; border: 1px solid #e2e8f0;
+    font-size: 12px; color: #64748b; text-align: left;
+  ">
+    <b style="color: #0f172a;">Como funciona:</b><br>
+    Este template é servido pelo ESP32 e renderizado pelo browser.
+    Os dados (como o contador) ficam no ESP32 via WebSocket.
+    Modifique este arquivo para criar seu próprio app!
+  </div>
+</div>
+
+<script>
+let _hwCount = 0;
+function hwClick() {
+  _hwCount++;
+  document.getElementById('hw-count').textContent = _hwCount;
+}
+function hwReset() {
+  _hwCount = 0;
+  document.getElementById('hw-count').textContent = '0';
+}
+</script>

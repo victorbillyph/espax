@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ESPmDNS.h>
@@ -364,6 +365,27 @@ static void fillState(JsonDocument &s) {
     }
     o["data"] = w->data.as<JsonVariant>();
   }
+
+  // repos e apps instalados
+  JsonArray reposArr = s["repos"].to<JsonArray>();
+  for (int i = 0; i < desktop.repoCount; i++) {
+    JsonObject ro = reposArr.add<JsonObject>();
+    ro["index"] = i;
+    ro["url"] = desktop.repos[i].url;
+    ro["nickname"] = desktop.repos[i].nickname;
+  }
+  JsonArray appsArr = s["installed"].to<JsonArray>();
+  for (int i = 0; i < desktop.appCount; i++) {
+    JsonObject ao = appsArr.add<JsonObject>();
+    ao["id"] = desktop.installedApps[i].id;
+    ao["name"] = desktop.installedApps[i].name;
+    ao["desc"] = desktop.installedApps[i].desc;
+    ao["icon"] = desktop.installedApps[i].icon;
+    ao["author"] = desktop.installedApps[i].author;
+    ao["version"] = desktop.installedApps[i].version;
+    ao["template"] = desktop.installedApps[i].templateHtml;
+    ao["css"] = desktop.installedApps[i].css;
+  }
 }
 
 // ---------- Estado: broadcast para todos os clientes WS ----------
@@ -423,6 +445,180 @@ static void processWsEvent(const JsonDocument &doc) {
         ESP.restart();
       }
     }
+  } else if (type == "appstore_list") {
+    // retorna repos + apps instalados
+    JsonDocument r;
+    r["type"] = "appstore_data";
+    JsonArray reposArr = r["repos"].to<JsonArray>();
+    for (int i = 0; i < desktop.repoCount; i++) {
+      JsonObject ro = reposArr.add<JsonObject>();
+      ro["index"] = i;
+      ro["url"] = desktop.repos[i].url;
+      ro["nickname"] = desktop.repos[i].nickname;
+    }
+    JsonArray appsArr = r["installed"].to<JsonArray>();
+    for (int i = 0; i < desktop.appCount; i++) {
+      JsonObject ao = appsArr.add<JsonObject>();
+      ao["id"] = desktop.installedApps[i].id;
+      ao["name"] = desktop.installedApps[i].name;
+      ao["desc"] = desktop.installedApps[i].desc;
+      ao["icon"] = desktop.installedApps[i].icon;
+      ao["author"] = desktop.installedApps[i].author;
+      ao["version"] = desktop.installedApps[i].version;
+    }
+    { String out; serializeJson(r, out); ws.textAll(out); }
+    return; // nao precisa de broadcastState
+
+  } else if (type == "appstore_addrepo") {
+    String url = doc["url"] | "";
+    String nick = doc["nickname"] | "";
+    desktop.addRepo(url, nick);
+
+  } else if (type == "appstore_removerepo") {
+    int idx = (int)doc["index"];
+    desktop.removeRepo(idx);
+
+  } else if (type == "appstore_browse") {
+    // busca a lista de apps de um repo via HTTP
+    String url = doc["url"] | "";
+    // suporta GitHub: https://github.com/user/repo -> api
+    // e URLs diretas que retornam JSON
+    JsonDocument r;
+    r["type"] = "appstore_browse";
+    r["url"] = url;
+    r["ok"] = false;
+
+    if (WiFi.status() == WL_CONNECTED && url.length() > 0) {
+      HTTPClient http;
+      String fetchUrl = url;
+
+      // converter GitHub URL para API
+      if (url.startsWith("https://github.com/") || url.startsWith("http://github.com/")) {
+        String path = url;
+        if (path.startsWith("http")) path = path.substring(path.indexOf("//") + 2);
+        if (path.endsWith("/")) path = path.substring(0, path.length() - 1);
+        // github.com/user/repo -> api.github.com/repos/user/repo/contents/apps
+        fetchUrl = "https://api.github.com/repos/" + path.substring(path.indexOf("/") + 1) + "/contents/apps";
+      }
+
+      http.begin(fetchUrl);
+      http.addHeader("Accept", "application/vnd.github.v3+json");
+      int code = http.GET();
+      if (code == 200) {
+        String payload = http.getString();
+        JsonDocument repoDoc;
+        DeserializationError err = deserializeJson(repoDoc, payload);
+        if (!err) {
+          JsonArray appsList = r["apps"].to<JsonArray>();
+          if (fetchUrl.indexOf("api.github.com") >= 0) {
+            // GitHub API: lista de arquivos
+            for (JsonObject item : repoDoc.as<JsonArray>()) {
+              String name = item["name"] | "";
+              String type2 = item["type"] | "";
+              if (type2 == "dir" && name.length() > 0) {
+                // cada dir e um app, buscar o manifest
+                String appUrl = "https://raw.githubusercontent.com/" +
+                  fetchUrl.substring(fetchUrl.indexOf("repos/") + 6,
+                                     fetchUrl.indexOf("/contents/")) +
+                  "/main/apps/" + name + "/manifest.json";
+                HTTPClient http2;
+                http2.begin(appUrl);
+                int c2 = http2.GET();
+                if (c2 == 200) {
+                  String m = http2.getString();
+                  JsonDocument manifest;
+                  if (!deserializeJson(manifest, m)) {
+                    JsonObject ao = appsList.add<JsonObject>();
+                    ao["id"] = manifest["id"] | name;
+                    ao["name"] = manifest["name"] | name;
+                    ao["desc"] = manifest["description"] | "";
+                    ao["icon"] = manifest["icon"] | "📦";
+                    ao["author"] = manifest["author"] | "";
+                    ao["version"] = manifest["version"] | "1.0";
+                    ao["dir"] = name;
+                  }
+                }
+                http2.end();
+              }
+            }
+          } else {
+            // formato direto: JSON array de apps
+            for (JsonObject item : repoDoc.as<JsonArray>()) {
+              JsonObject ao = appsList.add<JsonObject>();
+              ao["id"] = item["id"] | "";
+              ao["name"] = item["name"] | "";
+              ao["desc"] = item["description"] | item["desc"] | "";
+              ao["icon"] = item["icon"] | "📦";
+              ao["author"] = item["author"] | "";
+              ao["version"] = item["version"] | "1.0";
+              ao["dir"] = item["dir"] | item["id"] | "";
+            }
+          }
+          r["ok"] = true;
+        }
+      }
+      http.end();
+    }
+    { String out; serializeJson(r, out); ws.textAll(out); }
+    return;
+
+  } else if (type == "appstore_install") {
+    String repoUrl = doc["repo"] | "";
+    String appId = doc["appId"] | "";
+    String dir = doc["dir"] | appId;
+
+    // buscar manifest + template do repo
+    String baseUrl = repoUrl;
+    if (baseUrl.endsWith("/")) baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+
+    // suporta GitHub
+    if (repoUrl.startsWith("https://github.com/") || repoUrl.startsWith("http://github.com/")) {
+      String ghPath = repoUrl;
+      if (ghPath.startsWith("http")) ghPath = ghPath.substring(ghPath.indexOf("//") + 2);
+      if (ghPath.endsWith("/")) ghPath = ghPath.substring(0, ghPath.length() - 1);
+      String userRepo = ghPath.substring(ghPath.indexOf("/") + 1);
+      baseUrl = "https://raw.githubusercontent.com/" + userRepo + "/main/apps/" + dir;
+    } else {
+      baseUrl = baseUrl + "/" + dir;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      // buscar manifest.json
+      HTTPClient http;
+      http.begin(baseUrl + "/manifest.json");
+      int code = http.GET();
+      if (code == 200) {
+        String m = http.getString();
+        JsonDocument manifest;
+        if (!deserializeJson(manifest, m)) {
+          String name = manifest["name"] | appId;
+          String desc = manifest["description"] | "";
+          String icon = manifest["icon"] | "📦";
+          String author = manifest["author"] | "";
+          String version = manifest["version"] | "1.0";
+
+          // buscar template.html
+          http.end();
+          http.begin(baseUrl + "/template.html");
+          String tmpl = "";
+          if (http.GET() == 200) tmpl = http.getString();
+          http.end();
+
+          // buscar style.css (opcional)
+          String css = "";
+          http.begin(baseUrl + "/style.css");
+          if (http.GET() == 200) css = http.getString();
+          http.end();
+
+          desktop.installApp(appId, name, desc, icon, author, version, tmpl, css);
+        }
+      }
+      http.end();
+    }
+
+  } else if (type == "appstore_uninstall") {
+    String appId = doc["appId"] | "";
+    desktop.uninstallApp(appId);
   }
 
   broadcastState();

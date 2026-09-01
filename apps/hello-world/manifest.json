@@ -1,0 +1,8 @@
+{
+  "id": "hello-world",
+  "name": "Hello World",
+  "description": "App de exemplo para demonstrar como criar apps para o ESPax",
+  "icon": "👋",
+  "author": "ESPax Team",
+  "version": "1.0"
+}

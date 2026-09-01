@@ -11,13 +11,32 @@ struct Window {
   uint32_t z;
   bool minimized;
   bool maximized;
-  // estado especifico do app (calc display, terminal buffer, notepad text, ...)
   JsonDocument data;
   Window() : id(0), x(0), y(0), w(0), h(0), z(0), minimized(false), maximized(false) {}
 };
 
-// Limite de janelas simultaneas (memoria limitada do ESP32)
+// ---------- App instalado ----------
+struct InstalledApp {
+  String id;
+  String name;
+  String desc;
+  String icon;
+  String author;
+  String version;
+  String templateHtml;
+  String css;
+  bool operator==(const String &other) const { return id == other; }
+};
+
+// ---------- Repo ----------
+struct Repo {
+  String url;
+  String nickname;
+};
+
 #define MAX_WINDOWS 6
+#define MAX_APPS 16
+#define MAX_REPOS 4
 
 class Desktop {
 public:
@@ -25,6 +44,7 @@ public:
   void begin();
   void reset();
 
+  // --- Janelas ---
   Window* openApp(const String &app);
   Window* getWindow(uint32_t id);
   bool closeWindow(uint32_t id);
@@ -40,6 +60,26 @@ public:
   uint32_t nextId;
   uint32_t zTop;
 
+  // --- Apps instalados ---
+  InstalledApp installedApps[MAX_APPS];
+  int appCount;
+  bool installApp(const String &id, const String &name, const String &desc,
+                  const String &icon, const String &author, const String &version,
+                  const String &tmpl, const String &css);
+  bool uninstallApp(const String &id);
+  InstalledApp* getApp(const String &id);
+  void saveInstalledApps();
+  void loadInstalledApps();
+
+  // --- Repos ---
+  Repo repos[MAX_REPOS];
+  int repoCount;
+  bool addRepo(const String &url, const String &nickname);
+  bool removeRepo(int index);
+  void saveRepos();
+  void loadRepos();
+
+  // --- Serializacao ---
   String titleForApp(const String &app);
   void serializeWindow(JsonObject &o, Window *w);
   JsonDocument serializeState();

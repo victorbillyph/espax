@@ -29,6 +29,7 @@ let sysName = 'ESPax';
 let authed = false;
 let ws = null;
 let wsReconnect = null;
+let appState = { repos: [], installed: [] };
 
 // ============================================================================
 // Comunicacao ESP32 (WebSocket)
@@ -43,7 +44,10 @@ function send(obj) {
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen = () => { console.log('[ESPax] websocket conectado'); };
+  ws.onopen = () => {
+    console.log('[ESPax] websocket conectado');
+    ws.send(JSON.stringify({ type: 'appstore_list' }));
+  };
   ws.onclose = () => {
     console.log('[ESPax] websocket fechado, reconectando...');
     // se nao autenticado, mostra login
@@ -57,6 +61,40 @@ function connectWS() {
       sysName = msg.name || sysName;
     } else if (msg.type === 'state') {
       renderState(msg);
+    } else if (msg.type === 'appstore_data') {
+      // atualizar state local com repos e installed
+      appState.repos = msg.repos || [];
+      appState.installed = msg.installed || [];
+    } else if (msg.type === 'appstore_browse') {
+      // mostrar resultados da busca
+      const results = document.querySelector('#as-results');
+      if (results && msg.ok) {
+        const apps = msg.apps || [];
+        if (apps.length === 0) {
+          results.innerHTML = '<div class="as-empty">Nenhum app encontrado</div>';
+          return;
+        }
+        results.innerHTML = apps.map(a => `
+          <div class="as-app-card">
+            <div class="as-app-icon">${esc(a.icon)}</div>
+            <div class="as-app-info">
+              <div class="as-app-name">${esc(a.name)}</div>
+              <div class="as-app-desc">${esc(a.desc)}</div>
+              <div class="as-app-meta">${esc(a.author || 'Desconhecido')} · v${esc(a.version || '1.0')}</div>
+            </div>
+            <div class="as-app-actions">
+              <button class="as-btn as-btn-install" data-repo="${esc(msg.url)}" data-app="${esc(a.id)}" data-dir="${esc(a.dir || a.id)}">Instalar</button>
+            </div>
+          </div>
+        `).join('');
+        results.querySelectorAll('.as-btn-install').forEach(btn => {
+          btn.addEventListener('click', () => {
+            send({ type: 'appstore_install', repo: btn.dataset.repo, appId: btn.dataset.app, dir: btn.dataset.dir });
+          });
+        });
+      } else if (results) {
+        results.innerHTML = '<div class="as-empty">Erro ao buscar repositorio</div>';
+      }
     }
   };
 }
@@ -131,6 +169,8 @@ const windowEls = new Map(); // id -> { win, el }
 
 function renderState(state) {
   sysName = state.name || sysName;
+  state.repos = appState.repos;
+  state.installed = appState.installed;
   const order = state.windows
     .slice()
     .sort((a, b) => a.z - b.z);
@@ -396,6 +436,126 @@ function renderAppBody(body, w, state) {
         </div>
       </div>
     `;
+    return;
+  }
+
+  if (app === 'appstore') {
+    body.className = 'win-body app-appstore';
+    const repos = state.repos || [];
+    const installed = state.installed || [];
+
+    body.innerHTML = `
+      <div class="as-tabs">
+        <button class="as-tab active" data-tab="browse">Explorar</button>
+        <button class="as-tab" data-tab="installed">Instalados</button>
+        <button class="as-tab" data-tab="repos">Repositorios</button>
+      </div>
+      <div class="as-content" id="as-content"></div>
+    `;
+    const content = body.querySelector('#as-content');
+    const tabs = body.querySelectorAll('.as-tab');
+
+    function showBrowse() {
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'browse'));
+      content.innerHTML = `
+        <div class="as-section">
+          <div class="as-row">
+            <input class="as-input" id="as-browse-url" placeholder="URL do repositorio (ex: https://github.com/user/repo)">
+            <button class="as-btn" id="as-browse-btn">Buscar</button>
+          </div>
+          <div id="as-results" class="as-results"></div>
+        </div>
+      `;
+      content.querySelector('#as-browse-btn').addEventListener('click', () => {
+        const url = content.querySelector('#as-browse-url').value.trim();
+        if (url) send({ type: 'appstore_browse', url });
+      });
+    }
+
+    function showInstalled() {
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'installed'));
+      if (installed.length === 0) {
+        content.innerHTML = '<div class="as-empty">Nenhum app instalado</div>';
+        return;
+      }
+      content.innerHTML = installed.map(a => `
+        <div class="as-app-card">
+          <div class="as-app-icon">${esc(a.icon)}</div>
+          <div class="as-app-info">
+            <div class="as-app-name">${esc(a.name)}</div>
+            <div class="as-app-desc">${esc(a.desc)}</div>
+            <div class="as-app-meta">${esc(a.author || 'Desconhecido')} · v${esc(a.version || '1.0')}</div>
+          </div>
+          <div class="as-app-actions">
+            <button class="as-btn as-btn-open" data-app="${esc(a.id)}">Abrir</button>
+            <button class="as-btn as-btn-remove" data-app="${esc(a.id)}">Remover</button>
+          </div>
+        </div>
+      `).join('');
+      content.querySelectorAll('.as-btn-open').forEach(btn => {
+        btn.addEventListener('click', () => send({ type: 'open', app: btn.dataset.app }));
+      });
+      content.querySelectorAll('.as-btn-remove').forEach(btn => {
+        btn.addEventListener('click', () => send({ type: 'appstore_uninstall', appId: btn.dataset.app }));
+      });
+    }
+
+    function showRepos() {
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'repos'));
+      content.innerHTML = `
+        <div class="as-section">
+          <div class="as-row">
+            <input class="as-input" id="as-repo-url" placeholder="URL do repositorio">
+            <input class="as-input as-input-sm" id="as-repo-nick" placeholder="Apelido">
+            <button class="as-btn" id="as-add-repo">Adicionar</button>
+          </div>
+          <div class="as-repo-list">
+            ${repos.map((r, i) => `
+              <div class="as-repo">
+                <div class="as-repo-info">
+                  <span class="as-repo-name">${esc(r.nickname || r.url)}</span>
+                  <span class="as-repo-url">${esc(r.url)}</span>
+                </div>
+                <button class="as-btn as-btn-remove as-btn-sm" data-idx="${i}">Remover</button>
+              </div>
+            `).join('')}
+            ${repos.length === 0 ? '<div class="as-empty">Nenhum repositorio adicionado</div>' : ''}
+          </div>
+        </div>
+      `;
+      content.querySelector('#as-add-repo').addEventListener('click', () => {
+        const url = content.querySelector('#as-repo-url').value.trim();
+        const nick = content.querySelector('#as-repo-nick').value.trim();
+        if (url) send({ type: 'appstore_addrepo', url, nickname: nick });
+      });
+      content.querySelectorAll('.as-btn-remove[data-idx]').forEach(btn => {
+        btn.addEventListener('click', () => send({ type: 'appstore_removerepo', index: parseInt(btn.dataset.idx) }));
+      });
+    }
+
+    showBrowse();
+
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        if (tab.dataset.tab === 'browse') showBrowse();
+        else if (tab.dataset.tab === 'installed') showInstalled();
+        else if (tab.dataset.tab === 'repos') showRepos();
+      });
+    });
+    return;
+  }
+
+  // ---------- App customizado (template vindo do repo) ----------
+  const customApp = (state.installed || []).find(a => a.id === app);
+  if (customApp && customApp.template) {
+    body.className = 'win-body app-custom';
+    body.innerHTML = customApp.template;
+    // injetar CSS se houver
+    if (customApp.css) {
+      const style = document.createElement('style');
+      style.textContent = customApp.css;
+      body.appendChild(style);
+    }
     return;
   }
 
