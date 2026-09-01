@@ -43,4 +43,5 @@ public:
   String titleForApp(const String &app);
   void serializeWindow(JsonObject &o, Window *w);
   JsonDocument serializeState();
+  int estimateWindowRAM(Window *w);
 };

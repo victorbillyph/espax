@@ -155,7 +155,7 @@ function renderState(state) {
     } else {
       entry.w = w;
     }
-    applyWindowState(entry, w);
+    applyWindowState(entry, w, state);
   });
 
   renderTaskbar(order);
@@ -198,7 +198,7 @@ function createWindowEl(w) {
   return el;
 }
 
-function applyWindowState(entry, w) {
+function applyWindowState(entry, w, state) {
   const el = entry.el;
   const body = $('.win-body', el);
   el.style.left = w.x + 'px';
@@ -213,14 +213,14 @@ function applyWindowState(entry, w) {
   el.style.display = minimized ? 'none' : '';
 
   // renderizar conteudo do app (o PROCESSAMENTO ja veio do ESP32)
-  renderAppBody(body, w);
+  renderAppBody(body, w, state);
 }
 
 // ============================================================================
 // Apps - renderizacao (o estado/processamento vem do ESP32)
 // ============================================================================
 
-function renderAppBody(body, w) {
+function renderAppBody(body, w, state) {
   const app = w.app;
   const data = w.data || {};
 
@@ -327,6 +327,74 @@ function renderAppBody(body, w) {
         <tr><td>Heap</td><td>${prettyBytes(data.heap || 0)}</td></tr>
         <tr><td>Uptime</td><td>${(data.uptime || 0)}s</td></tr>
       </table>
+    `;
+    return;
+  }
+
+  if (app === 'taskmanager') {
+    body.className = 'win-body app-taskmanager';
+    const windows = state.windows || [];
+    const totalRAM = windows.reduce((s, w) => s + (w.ram || 0), 0);
+    const heap = state.heap || 0;
+    const heapMax = 320000;
+    const heapPct = Math.round((heap / heapMax) * 100);
+    const chip = state.chip || {};
+    const uptime = state.uptime || 0;
+    const h = Math.floor(uptime / 3600);
+    const m = Math.floor((uptime % 3600) / 60);
+    const sec = uptime % 60;
+
+    body.innerHTML = `
+      <div class="tm-section">
+        <div class="tm-header">Sistema</div>
+        <div class="tm-bars">
+          <div class="tm-bar-row">
+            <span class="tm-label">RAM Heap</span>
+            <div class="tm-bar"><div class="tm-fill" style="width:${100 - heapPct}%"></div></div>
+            <span class="tm-val">${prettyBytes(heap)} / 320 KB</span>
+          </div>
+          <div class="tm-bar-row">
+            <span class="tm-label">Janelas</span>
+            <div class="tm-bar"><div class="tm-fill tm-fill-purple" style="width:${(windows.length / 6) * 100}%"></div></div>
+            <span class="tm-val">${windows.length} / 6</span>
+          </div>
+          <div class="tm-bar-row">
+            <span class="tm-label">RAM Apps</span>
+            <div class="tm-bar"><div class="tm-fill tm-fill-cyan" style="width:${Math.min(100, (totalRAM / heapMax) * 100)}%"></div></div>
+            <span class="tm-val">${prettyBytes(totalRAM)}</span>
+          </div>
+        </div>
+      </div>
+      <div class="tm-section">
+        <div class="tm-header">Processos</div>
+        <div class="tm-process-list">
+          <div class="tm-proc tm-proc-head">
+            <span class="tm-proc-id">ID</span>
+            <span class="tm-proc-app">App</span>
+            <span class="tm-proc-ram">RAM</span>
+            <span class="tm-proc-status">Status</span>
+          </div>
+          ${windows.map(w => `
+            <div class="tm-proc">
+              <span class="tm-proc-id">#${w.id}</span>
+              <span class="tm-proc-app">${esc(w.title || w.app)}</span>
+              <span class="tm-proc-ram">${prettyBytes(w.ram || 0)}</span>
+              <span class="tm-proc-status ${w.min ? 'tm-minimized' : 'tm-running'}">${w.min ? 'Minimizado' : 'Executando'}</span>
+            </div>
+          `).join('')}
+          ${windows.length === 0 ? '<div class="tm-empty">Nenhum processo ativo</div>' : ''}
+        </div>
+      </div>
+      <div class="tm-section">
+        <div class="tm-header">Info</div>
+        <div class="tm-info-grid">
+          <div class="tm-info"><span class="tm-info-label">Uptime</span><span class="tm-info-val">${h}h ${m}m ${sec}s</span></div>
+          <div class="tm-info"><span class="tm-info-label">Chip</span><span class="tm-info-val">${esc(chip.model || '')}</span></div>
+          <div class="tm-info"><span class="tm-info-label">Freq</span><span class="tm-info-val">${chip.frequency || 0} MHz</span></div>
+          <div class="tm-info"><span class="tm-info-label">WiFi</span><span class="tm-info-val">${esc(state.ssid || 'N/A')}</span></div>
+          <div class="tm-info"><span class="tm-info-label">IP</span><span class="tm-info-val">${esc(state.ip || '')}</span></div>
+        </div>
+      </div>
     `;
     return;
   }

@@ -346,6 +346,7 @@ static void fillState(JsonDocument &s) {
     o["z"] = (unsigned long)w->z;
     o["min"] = w->minimized;
     o["max"] = w->maximized;
+    o["ram"] = desktop.estimateWindowRAM(w);
     if (w->app == "files") {
       JsonArray files = o["files"].to<JsonArray>();
       File root = LittleFS.open("/");

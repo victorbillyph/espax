@@ -28,6 +28,7 @@ String Desktop::titleForApp(const String &app) {
   if (app == "about") return "Sobre";
   if (app == "info") return "Info do Sistema";
   if (app == "browser") return "Browser";
+  if (app == "taskmanager") return "Gerenciador de Tarefas";
   return app;
 }
 
@@ -175,4 +176,16 @@ JsonDocument Desktop::serializeState() {
     serializeWindow(o, windows[i]);
   }
   return s;
+}
+
+int Desktop::estimateWindowRAM(Window *w) {
+  // estimativa: struct Window (~384 bytes) + JsonDocument data (~256-2048 bytes)
+  // + titulo, app strings (~64 bytes cada)
+  int base = 384 + 128; // struct + strings
+  String d = w->data["display"] | "";
+  String o = w->data["output"] | "";
+  String t = w->data["text"] | "";
+  int dataSize = d.length() + o.length() + t.length();
+  if (dataSize == 0) dataSize = w->data.size() * 32; // estimativa base
+  return base + dataSize + 256; // 256 = overhead do JsonDocument
 }
