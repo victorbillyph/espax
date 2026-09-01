@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ESPmDNS.h>
@@ -16,6 +17,9 @@
 #define DEFAULT_USERNAME "admin"
 #define DEFAULT_WIFI_SSID ""
 #define DEFAULT_WIFI_PASS ""
+
+#define ESPAX_VERSION "1.1.0"
+#define ESPAX_GITHUB_REPO "victorbillyph/espax"
 
 #define AUTH_TIMEOUT_MS 1000 * 60 * 30
 
@@ -323,6 +327,7 @@ static void fillState(JsonDocument &s) {
   s["type"] = "state";
   s["name"] = sys_name;
   s["hostname"] = hostname;
+  s["version"] = ESPAX_VERSION;
   s["heap"] = (long)ESP.getFreeHeap();
   s["uptime"] = (unsigned long)(millis() / 1000);
   s["ip"] = WiFi.localIP().toString();
@@ -619,6 +624,59 @@ static void processWsEvent(const JsonDocument &doc) {
   } else if (type == "appstore_uninstall") {
     String appId = doc["appId"] | "";
     desktop.uninstallApp(appId);
+
+  } else if (type == "check_update") {
+    if (WiFi.status() == WL_CONNECTED) {
+      String versionUrl = "https://raw.githubusercontent.com/" + String(ESPAX_GITHUB_REPO) + "/main/version.json";
+      HTTPClient http;
+      http.begin(versionUrl);
+      http.setTimeout(8000);
+      int code = http.GET();
+      JsonDocument r;
+      r["type"] = "update_info";
+      if (code == 200) {
+        String payload = http.getString();
+        JsonDocument doc2;
+        if (!deserializeJson(doc2, payload)) {
+          String latest = doc2["version"] | "";
+          String binUrl = doc2["binUrl"] | "";
+          String changelog = doc2["changelog"] | "";
+          r["ok"] = true;
+          r["current"] = ESPAX_VERSION;
+          r["latest"] = latest;
+          r["binUrl"] = binUrl;
+          r["changelog"] = changelog;
+          r["updateAvailable"] = (latest != ESPAX_VERSION && binUrl.length() > 0);
+        } else {
+          r["ok"] = false;
+          r["msg"] = "Parse error";
+        }
+      } else {
+        r["ok"] = false;
+        r["msg"] = "HTTP error " + String(code);
+      }
+      http.end();
+      String out;
+      serializeJson(r, out);
+      ws.textAll(out);
+    }
+    return;
+
+  } else if (type == "install_update") {
+    String binUrl = doc["binUrl"] | "";
+    if (binUrl.length() > 0 && WiFi.status() == WL_CONNECTED) {
+      JsonDocument r;
+      r["type"] = "update_progress";
+      r["msg"] = "Baixando firmware...";
+      String out;
+      serializeJson(r, out);
+      ws.textAll(out);
+
+      delay(500);
+      WiFiClient client;
+      httpUpdate.update(client, binUrl);
+    }
+    return;
   }
 
   broadcastState();
@@ -825,6 +883,74 @@ static void apiProxy(AsyncWebServerRequest *request) {
   http.end();
 }
 
+// ---------- OTA Update via GitHub ----------
+static void apiCheckUpdate(AsyncWebServerRequest *request) {
+  if (WiFi.status() != WL_CONNECTED) {
+    request->send(503, "application/json", "{\"ok\":false,\"msg\":\"No WiFi\"}");
+    return;
+  }
+
+  String versionUrl = "https://raw.githubusercontent.com/" + String(ESPAX_GITHUB_REPO) + "/main/version.json";
+  HTTPClient http;
+  http.begin(versionUrl);
+  http.setTimeout(8000);
+  int code = http.GET();
+
+  if (code != 200) {
+    http.end();
+    request->send(502, "application/json", "{\"ok\":false,\"msg\":\"HTTP error\"}");
+    return;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) {
+    request->send(500, "application/json", "{\"ok\":false,\"msg\":\"Parse error\"}");
+    return;
+  }
+
+  String latestVersion = doc["version"] | "";
+  String binUrl = doc["binUrl"] | "";
+  String changelog = doc["changelog"] | "";
+
+  JsonDocument r;
+  r["ok"] = true;
+  r["current"] = ESPAX_VERSION;
+  r["latest"] = latestVersion;
+  r["binUrl"] = binUrl;
+  r["changelog"] = changelog;
+  r["updateAvailable"] = (latestVersion != ESPAX_VERSION && binUrl.length() > 0);
+  String out;
+  serializeJson(r, out);
+  request->send(200, "application/json", out);
+}
+
+static void apiInstallUpdate(AsyncWebServerRequest *request) {
+  if (WiFi.status() != WL_CONNECTED) {
+    request->send(503, "application/json", "{\"ok\":false,\"msg\":\"No WiFi\"}");
+    return;
+  }
+
+  String binUrl = request->arg("url");
+  if (binUrl.length() == 0) {
+    request->send(400, "application/json", "{\"ok\":false,\"msg\":\"url required\"}");
+    return;
+  }
+
+  request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Installing...\"}");
+  delay(500);
+
+  WiFiClient client;
+  t_httpUpdate_return ret = httpUpdate.update(client, binUrl);
+
+  if (ret == HTTP_UPDATE_OK) {
+    ESP.restart();
+  }
+  // se falhar, o ESP32 continua rodando (nao reinicia)
+}
+
 // ---------- WiFi connect ----------
 static bool connectStation() {
   if (strlen(wifi_ssid) == 0) return false;
@@ -924,6 +1050,8 @@ void setup() {
   server.on("/api/logout", HTTP_POST, apiClearSession);
   server.on("/api/proxy", HTTP_GET, apiProxy);
   server.on("/api/proxy", HTTP_POST, apiProxy);
+  server.on("/api/check-update", HTTP_GET, apiCheckUpdate);
+  server.on("/api/install-update", HTTP_POST, apiInstallUpdate);
 
   server.onNotFound([](AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "Not found");

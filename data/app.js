@@ -95,6 +95,31 @@ function connectWS() {
       } else if (results) {
         results.innerHTML = '<div class="as-empty">Erro ao buscar repositorio</div>';
       }
+    } else if (msg.type === 'update_info') {
+      const status = document.querySelector('#update-status');
+      if (status) {
+        if (msg.ok && msg.updateAvailable) {
+          status.innerHTML = `Nova versao: <b>${esc(msg.latest)}</b> (atual: ${esc(msg.current)})` +
+            `<br><button id="btn-install-update" style="margin-top:8px;padding:8px 16px;border:none;border-radius:6px;background:#22c55e;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Instalar</button>`;
+          status.style.color = '#22c55e';
+          status.querySelector('#btn-install-update').addEventListener('click', () => {
+            status.textContent = 'Instalando...';
+            send({ type: 'install_update', binUrl: msg.binUrl });
+          });
+        } else if (msg.ok) {
+          status.textContent = 'Firmware atualizado!';
+          status.style.color = '#22c55e';
+        } else {
+          status.textContent = 'Erro: ' + (msg.msg || 'desconhecido');
+          status.style.color = '#ef4444';
+        }
+      }
+    } else if (msg.type === 'update_progress') {
+      const status = document.querySelector('#update-status');
+      if (status) {
+        status.textContent = msg.msg || 'Atualizando...';
+        status.style.color = '#f59e0b';
+      }
     }
   };
 }
@@ -354,12 +379,13 @@ function renderAppBody(body, w, state) {
     body.className = 'win-body app-about';
     body.innerHTML = `
       <div class="about-logo">ESP<span>ax</span></div>
-      <p>Web Desktop System v1.1</p>
+      <p>Web Desktop System v${esc(state.version || '?')}</p>
       <p>Processamento: <b>ESP32</b></p>
       <p>Renderizacao: <b>Browser</b></p>
       <table class="info-table">
         <tr><td>Nome</td><td>${esc(data.name || '')}</td></tr>
         <tr><td>Hostname</td><td>${esc(data.hostname || '')}</td></tr>
+        <tr><td>Versao</td><td>${esc(state.version || '')}</td></tr>
         <tr><td>IP</td><td>${esc(data.ip || '')}</td></tr>
         <tr><td>WiFi</td><td>${esc(data.ssid || '')}</td></tr>
         <tr><td>Chip</td><td>${esc(data.chip ? data.chip.model : '')}</td></tr>
@@ -367,7 +393,21 @@ function renderAppBody(body, w, state) {
         <tr><td>Heap</td><td>${prettyBytes(data.heap || 0)}</td></tr>
         <tr><td>Uptime</td><td>${(data.uptime || 0)}s</td></tr>
       </table>
+      <div style="margin-top:16px;text-align:center">
+        <button id="about-update" style="
+          padding:10px 20px;border:none;border-radius:8px;
+          background:linear-gradient(135deg,var(--accent),var(--accent2));
+          color:#fff;font-weight:600;cursor:pointer;font-size:13px;
+        ">Buscar Atualizacoes</button>
+        <div id="update-status" style="margin-top:10px;font-size:12px;color:#94a3b8"></div>
+      </div>
     `;
+    body.querySelector('#about-update').addEventListener('click', () => {
+      const status = body.querySelector('#update-status');
+      status.textContent = 'Verificando...';
+      status.style.color = '#94a3b8';
+      send({ type: 'check_update' });
+    });
     return;
   }
 
