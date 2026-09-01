@@ -284,6 +284,130 @@ const { files: list } = await files.json();
 | POST | `/api/notepad` | Salvar conteudo do notepad |
 | GET | `/api/files` | Listar arquivos do LittleFS |
 | POST | `/api/reboot` | Reiniciar ESP32 |
+| GET/POST | `/api/proxy` | Proxy para APIs externas |
+
+### APIs Externas (Proxy)
+
+Apps podem acessar APIs externas da internet via o ESP32. O endpoint `/api/proxy` faz o request externo e repassa a resposta.
+
+**Por que usar o proxy?**
+- Evita problemas de CORS
+- Funciona com qualquer API
+- O ESP32 tem acesso WiFi a internet
+
+**Uso basico:**
+
+```javascript
+// GET simples
+const res = await fetch('/api/proxy?url=https://api.exemplo.com/dados');
+const { ok, status, body } = await res.json();
+if (ok) {
+  const dados = JSON.parse(body);
+  console.log(dados);
+}
+```
+
+**Com metodo POST e body:**
+
+```javascript
+const res = await fetch('/api/proxy', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: 'url=' + encodeURIComponent('https://api.exemplo.com/enviar') +
+        '&method=POST' +
+        '&content-type=application/json' +
+        '&body=' + encodeURIComponent(JSON.stringify({ nome: "teste" }))
+});
+const { ok, status, body } = await res.json();
+```
+
+**Parametros do proxy:**
+
+| Parametro | Obrigatorio | Descricao |
+|-----------|-------------|-----------|
+| `url` | sim | URL completa para buscar |
+| `method` | nao | GET (padrao), POST, PUT, PATCH |
+| `body` | nao | Corpo da requisicao (para POST/PUT/PATCH) |
+| `content-type` | nao | Content-Type do body |
+
+**Resposta:**
+
+```json
+{
+  "ok": true,
+  "status": 200,
+  "body": "{ \"dados\": \"...\" }"
+}
+```
+
+**Exemplo: app que busca clima**
+
+```html
+<div style="padding: 16px;">
+  <h3>Clima</h3>
+  <button onclick="buscarClima()">Buscar Clima</button>
+  <pre id="clima" style="
+    background: #f8fafc; padding: 12px;
+    border-radius: 8px; margin-top: 10px;
+    font-size: 13px; white-space: pre-wrap;
+  "></pre>
+
+  <script>
+    async function buscarClima() {
+      const out = document.getElementById('clima');
+      out.textContent = 'Buscando...';
+
+      const city = 'Sao Paulo';
+      const url = 'https://wttr.in/' + encodeURIComponent(city) + '?format=j1';
+      const res = await fetch('/api/proxy?url=' + encodeURIComponent(url));
+      const data = await res.json();
+
+      if (data.ok) {
+        const clima = JSON.parse(data.body);
+        const temp = clima.current_condition[0].temp_C;
+        out.textContent = 'Temperatura em ' + city + ': ' + temp + '°C';
+      } else {
+        out.textContent = 'Erro: ' + data.msg;
+      }
+    }
+  </script>
+</div>
+```
+
+**Exemplo: app que consulta GitHub**
+
+```html
+<div style="padding: 16px;">
+  <h3>GitHub</h3>
+  <input id="user" placeholder="Usuario GitHub" value="victorbillyph">
+  <button onclick="buscarUser()">Buscar</button>
+  <div id="resultado" style="margin-top: 10px;"></div>
+
+  <script>
+    async function buscarUser() {
+      const user = document.getElementById('user').value;
+      const url = 'https://api.github.com/users/' + user;
+      const res = await fetch('/api/proxy?url=' + encodeURIComponent(url));
+      const data = await res.json();
+
+      if (data.ok) {
+        const u = JSON.parse(data.body);
+        document.getElementById('resultado').innerHTML =
+          '<b>' + u.name + '</b><br>' +
+          'Repos: ' + u.public_repos + '<br>' +
+          'Followers: ' + u.followers;
+      }
+    }
+  </script>
+</div>
+```
+
+**Limitacoes do proxy:**
+- Timeout: 10 segundos
+- Memoria: respostas grandes podem estourar RAM (~50KB max recomendado)
+- Metodos suportados: GET, POST, PUT, PATCH
+- Headers: so Content-Type e suportado
+- Autenticacao: requer token do ESPax
 
 **Nota:** Os endpoints exigem autenticacao. O token e gerenciado automaticamente pelo ESPax. Apps customizados rodam dentro do contexto autenticado.
 

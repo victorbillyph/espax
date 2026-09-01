@@ -767,6 +767,64 @@ static void apiClearSession(AsyncWebServerRequest *request) {
   request->send(200, "application/json", "{\"ok\":true}");
 }
 
+// ---------- Proxy HTTP: ESP32 busca URL externa e repassa ----------
+static void apiProxy(AsyncWebServerRequest *request) {
+  if (!checkAuth()) {
+    request->send(401, "application/json", "{\"ok\":false,\"msg\":\"Not auth\"}");
+    return;
+  }
+  String url = request->arg("url");
+  String method = request->arg("method");
+  String body = request->arg("body");
+  String contentType = request->arg("content-type");
+
+  if (url.length() == 0) {
+    request->send(400, "application/json", "{\"ok\":false,\"msg\":\"url required\"}");
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    request->send(503, "application/json", "{\"ok\":false,\"msg\":\"No WiFi\"}");
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(10000);
+
+  if (contentType.length() > 0) {
+    http.addHeader("Content-Type", contentType);
+  }
+
+  int code;
+  if (method == "POST" || method == "PUT" || method == "PATCH") {
+    if (method == "POST") code = http.POST(body);
+    else if (method == "PUT") code = http.PUT(body);
+    else code = http.sendRequest("PATCH", body);
+  } else {
+    code = http.GET();
+  }
+
+  if (code > 0) {
+    String payload = http.getString();
+    JsonDocument r;
+    r["ok"] = true;
+    r["status"] = code;
+    r["body"] = payload;
+    String out;
+    serializeJson(r, out);
+    request->send(200, "application/json", out);
+  } else {
+    JsonDocument r;
+    r["ok"] = false;
+    r["msg"] = http.errorToString(code);
+    String out;
+    serializeJson(r, out);
+    request->send(502, "application/json", out);
+  }
+  http.end();
+}
+
 // ---------- WiFi connect ----------
 static bool connectStation() {
   if (strlen(wifi_ssid) == 0) return false;
@@ -864,6 +922,8 @@ void setup() {
   server.on("/api/files", HTTP_GET, apiFiles);
   server.on("/api/reboot", HTTP_POST, apiReboot);
   server.on("/api/logout", HTTP_POST, apiClearSession);
+  server.on("/api/proxy", HTTP_GET, apiProxy);
+  server.on("/api/proxy", HTTP_POST, apiProxy);
 
   server.onNotFound([](AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "Not found");
